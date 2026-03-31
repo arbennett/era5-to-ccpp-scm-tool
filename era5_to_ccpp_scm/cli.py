@@ -1,9 +1,6 @@
-import os
-import time
 import click
 import xarray as xr
 import numpy as np
-import netCDF4 as nc
 
 from . import templates
 from .util import _maybe_open
@@ -58,7 +55,13 @@ def _core_convert_forcings(
     ds1 = _maybe_open(era5_surface_file)
     ds2 = _maybe_open(era5_pressure_levels_file)
     ds = xr.merge([ds1, ds2])
-    ds = ds.rename({'valid_time': 'time', 'pressure_level': 'levels',})
+    rename_map = {}
+    if "valid_time" in ds.dims or "valid_time" in ds.coords:
+        rename_map["valid_time"] = "time"
+    if "pressure_level" in ds.dims or "pressure_level" in ds.coords:
+        rename_map["pressure_level"] = "levels"
+    if rename_map:
+        ds = ds.rename(rename_map)
     out = era5_to_scm_forcing(ds)
     if output_file is not None:
         out.to_netcdf(output_file, format="NETCDF4")
@@ -94,7 +97,6 @@ def _core_convert_era5_from_template(
     era5_ds = _maybe_open(era5_processed_forcings)
 
     # Interpolate the ERA5 data to the template levels
-    # TODO: Is a linear interpolation the best way to do this?
     era5_ds = era5_ds.interp(levels=template_index.levels, method='linear')
 
     # Convert the timestamps to SCM format
@@ -105,23 +107,34 @@ def _core_convert_era5_from_template(
     era5_ds = era5_ds.assign_coords(time=new_time)
     era5_ds.time.attrs['units'] = 's'
     era5_ds.time.attrs['long_name'] = 'elapsed time since the beginning of the simulation'
-    template_index = template_index.drop_vars('time').assign_coords({'time': new_time})
+    if "time" in template_index.data_vars:
+        template_index = template_index.drop_vars("time")
+    template_index = template_index.assign_coords({"time": new_time})
 
-    # Replace the lat/lon values in the template with the ERA5 values
-    template_scalars = template_scalars.assign_coords(
-        latitude=era5_ds.latitude, longitude=era5_ds.longitude
-    )
+    # Write forcing variables by matching template var shapes/dims.
+    forcing_out = template_forcing.copy(deep=True)
+    for var in template_forcing.data_vars:
+        if var not in era5_ds:
+            continue
+        da = era5_ds[var]
+        if set(template_forcing[var].dims).issubset(set(da.dims)):
+            da = da.transpose(*template_forcing[var].dims)
+            forcing_out[var] = xr.DataArray(
+                da.values.astype(template_forcing[var].dtype, copy=False),
+                dims=template_forcing[var].dims,
+                coords={d: forcing_out.coords[d] for d in template_forcing[var].dims if d in forcing_out.coords},
+                attrs=template_forcing[var].attrs,
+            )
 
-    # Then create groups and write to them
-    with nc.Dataset(output_file, 'w') as root_grp:
-        # Create the groups
-        grp1 = root_grp.createGroup('forcing')
-        grp2 = root_grp.createGroup('initial')
-        grp3 = root_grp.createGroup('scalars')
-        
-    # Write to each group
+    # Update scalar lat/lon if present from processed forcing output.
+    if "lat" in template_scalars and "latitude" in era5_ds:
+        template_scalars["lat"] = xr.DataArray(float(era5_ds["latitude"].values))
+    if "lon" in template_scalars and "longitude" in era5_ds:
+        template_scalars["lon"] = xr.DataArray(float(era5_ds["longitude"].values))
+
+    # Write groups
     template_index.to_netcdf(output_file, mode='w')
-    era5_ds.to_netcdf(output_file, group='forcing', mode='a')
+    forcing_out.to_netcdf(output_file, group='forcing', mode='a')
     template_initial.to_netcdf(output_file, group='initial', mode='a')
     template_scalars.to_netcdf(output_file, group='scalars', mode='a')
 
