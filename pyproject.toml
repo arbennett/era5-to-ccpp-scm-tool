@@ -4,29 +4,42 @@ build-backend = "hatchling.build"
 
 [project]
 name = "era5-to-ccpp-scm-tool"
-version = "0.0.0"
-description = "A small command line tool for generating CCPP SCM inputs from ERA5 data"
+version = "0.1.0"
+description = "Generate CCPP-SCM cases from ERA5 reanalysis"
 authors = [
     { name = "Andrew Bennett", email = "andrbenn@arizona.edu" },
 ]
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
     "click>=8.0.0",
-    "xarray",
+    "numpy>=2.2.4",
+    "pandas>=2.2.3",
+    "xarray>=2025.3.1",
     "metpy",
-    "numpy",
-    "pandas",
     # NetCDF I/O engines. Without at least one of these xarray cannot open
     # any of the files this tool reads or writes.
-    "netcdf4",
-    "h5netcdf",
+    "netcdf4>=1.7.2",
+    "h5netcdf>=1.6.1",
     "h5py",
     # Anonymous access to the NSF NCAR ERA5 archive on S3.
     "s3fs",
     "fsspec",
     "aiohttp",
+    # Reading and writing SCM case-config namelists.
+    "f90nml>=1.4.5",
+    "dask>=2025.3.0",
+    "zarr>=3.0.6",
 ]
-requires-python = ">=3.9"
-readme = "README.md"
+
+[project.optional-dependencies]
+notebooks = [
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.1",
+]
+test = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 era5-scm-tool = "era5_to_ccpp_scm.cli:cli"  # This makes your script executable

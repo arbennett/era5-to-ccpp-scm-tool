@@ -78,11 +78,24 @@ def download_era5(
 def _core_convert_forcings(
     era5_surface_file: Union[str, xr.Dataset],
     era5_pressure_levels_file: Union[str, xr.Dataset],
-    output_file: Optional[str]=None
+    output_file: Optional[str]=None,
+    era5_rad_file: Union[str, xr.Dataset, None]=None,
 ):
-    ds1 = _maybe_open(era5_surface_file)
-    ds2 = _maybe_open(era5_pressure_levels_file)
-    ds = xr.merge([ds1, ds2])
+    """
+    Merge raw ERA5 files and derive the SCM forcing fields.
+
+    The downloader folds the radiative fluxes into the surface file, so
+    ``era5_rad_file`` is only needed for older extractions that kept them in a
+    third file.
+    """
+    parts = [_maybe_open(era5_surface_file)]
+    if era5_rad_file is not None:
+        parts.append(_maybe_open(era5_rad_file))
+    parts.append(_maybe_open(era5_pressure_levels_file))
+    # The inputs hold disjoint variables, so no_conflicts is both the safe
+    # choice and the one that flags an unexpected overlap instead of hiding it.
+    ds = xr.merge(parts, compat="no_conflicts")
+
     rename_map = {}
     if "valid_time" in ds.dims or "valid_time" in ds.coords:
         rename_map["valid_time"] = "time"
@@ -93,6 +106,7 @@ def _core_convert_forcings(
             rename_map[source_name] = "levels"
     if rename_map:
         ds = ds.rename(rename_map)
+
     out = era5_to_scm_forcing(ds)
     if output_file is not None:
         out.to_netcdf(output_file, format="NETCDF4")
@@ -100,18 +114,24 @@ def _core_convert_forcings(
 
 
 @cli.command(name='convert_forcings')
-@click.option('-s', '--era5_surface_file', type=str)
-@click.option('-p', '--era5_pressure_levels_file', type=str)
+@click.option('-s', '--era5_surface_file', type=str, required=True)
+@click.option('-p', '--era5_pressure_levels_file', type=str, required=True)
 @click.option('-o', '--output_file', type=str)
+@click.option('-r', '--era5_rad_file', type=str, default=None,
+              help='Optional separate radiative-flux file. Only needed for '
+                   'older extractions; the downloader now writes the fluxes '
+                   'into the surface file.')
 def convert_forcings(
     era5_surface_file: Union[str, xr.Dataset],
     era5_pressure_levels_file: Union[str, xr.Dataset],
     output_file: Optional[str]=None,
+    era5_rad_file: Union[str, xr.Dataset, None]=None,
 ):
     """
     Convert ERA5 data to intermediate SCM forcing file.
     """
-    return _core_convert_forcings(era5_surface_file, era5_pressure_levels_file, output_file)
+    return _core_convert_forcings(era5_surface_file, era5_pressure_levels_file,
+                                  output_file, era5_rad_file)
 
 
 def _core_convert_era5_from_template(
