@@ -12,11 +12,20 @@ authors = [
 dependencies = [
     "click>=8.0.0",
     "xarray",
-    "cdsapi",
     "metpy",
-    "numpy"
+    "numpy",
+    "pandas",
+    # NetCDF I/O engines. Without at least one of these xarray cannot open
+    # any of the files this tool reads or writes.
+    "netcdf4",
+    "h5netcdf",
+    "h5py",
+    # Anonymous access to the NSF NCAR ERA5 archive on S3.
+    "s3fs",
+    "fsspec",
+    "aiohttp",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 readme = "README.md"
 
 [project.scripts]

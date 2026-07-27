@@ -1,5 +1,9 @@
 # Command line tool for converting ERA5 data to CCPP-SCM input
 
+Builds ready-to-run [CCPP-SCM](https://ccpp-scm.readthedocs.io/en/latest/)
+cases from ERA5 reanalysis for any point on the globe. Output is written in
+DEPHY format and validated against CCPP-SCM v7.0.0.
+
 ## Installation
 For now this tool can only be installed from source. To install it, clone the repository and run the following command in the root directory of the repository:
 
@@ -15,20 +19,60 @@ era5-scm-tool --help
 ```
 
 ### Downloading ERA5 data
-This tool mainly supports downloading ERA5 data for a single location and time period. To download ERA5 data run:
+
+ERA5 is read from the [NSF NCAR ERA5 archive](https://registry.opendata.aws/nsf-ncar-era5/)
+(RDA ds633.0), which is public: **no CDS account, API key, or request queue**.
+The same archive is published in two places with an identical layout, selected
+with `--source`:
+
+| `--source` | Reads from | Notes |
+|---|---|---|
+| `aws` | `s3://nsf-ncar-era5` | Anonymous S3, works anywhere |
+| `glade` | `/glade/campaign/collections/rda/data/d633000` | NCAR only, ~5x faster |
+| `auto` (default) | Glade if visible, else S3 | |
 
 ```bash
-era5-scm-tool download_era5 --help
+era5-scm-tool download_era5 \
+  --lat 31.7438 \
+  --lon -110.0522 \
+  --start_date 2019-01-01 \
+  --end_date 2019-01-02 \
+  --output_dir . \
+  --name US-Whs \
+  --source aws
 ```
 
-Example usage:
+This writes `US-Whs_pl.nc` (pressure-level) and `US-Whs_sfc.nc` (surface plus
+radiative fluxes), each holding the 3x3 grid stencil centred on the site that
+the forcing calculation needs for horizontal gradients.
 
-```bash
-era5-scm-tool download_era5 --latitude 52.52 --longitude -103.40 --start-date 2019-01-01 --end-date 2019-01-02 --output-file era5_data.nc
+#### A note on cost, and why you should batch sites
+
+ERA5 in this archive is chunked one *whole global field* per time step, so
+extracting a 3x3 stencil costs the same as reading the entire file — about
+1.3 GB per pressure-level variable per day. That cost is per file, not per
+site, so pulling many sites in one pass is much cheaper than looping. Use
+`download_era5_sites` from Python for that:
+
+```python
+from era5_to_ccpp_scm.download_era5 import download_era5_sites
+
+download_era5_sites(
+    {"US-Whs": (31.7438, -110.0522),
+     "US-MMS": (39.3232,  -86.4131),
+     "US-Ha1": (42.5378,  -72.1715)},
+    start_date="2019-06-01",
+    end_date="2019-06-02",
+    output_dir="./cases",
+    source="aws",
+)
 ```
 
-### Converting ERA5 data to CCPP-SCM input data
-To convert the downloaded ERA5 data to CCPP-SCM input data run:
+Long time ranges are expensive from S3 for this reason; on NCAR machines
+prefer `--source glade`.
+
+### Converting ERA5 data to forcing data
+To convert downloaded ERA5 surface + pressure-level files into processed SCM forcing fields:
 
 ```bash
 era5-scm-tool convert_forcings --help
@@ -39,6 +83,68 @@ Example usage:
 ```bash
 era5-scm-tool convert_forcings -s era5_sfc.nc -p era5_pl.nc -o ccpp_scm_forcing.nc
 ```
+
+### Writing the SCM case (DEPHY format)
+`convert_to_dephy` writes the `*_SCM_driver.nc` file the SCM reads, plus its
+companion case-config namelist, and can install both directly into an SCM
+checkout:
+
+```bash
+era5-scm-tool convert_to_dephy \
+  --era5_processed_forcings US-Whs_scm_forcings.nc \
+  --start_date 2019-01-01 \
+  --case_name fluxnet_US-Whs \
+  --output_file fluxnet_US-Whs_SCM_driver.nc \
+  --scm_cases_dir  "$SCM_ROOT/scm/data/processed_case_input" \
+  --scm_config_dir "$SCM_ROOT/scm/etc/case_config"
+```
+
+`convert_era5_from_template` writes the older grouped format (`forcing`,
+`initial`, `scalars` groups) and is kept only for backward compatibility;
+current SCM releases read DEPHY.
+
+### Running the full pipeline
+Download, forcing conversion and DEPHY output in one command:
+
+```bash
+era5-scm-tool run_full_pipeline \
+  --start_date 2019-01-01 \
+  --end_date 2019-01-02 \
+  --lat 31.7438 \
+  --lon -110.0522 \
+  --output_dir . \
+  --case_name fluxnet_US-Whs \
+  --source aws \
+  --template gabls3
+```
+
+Then run it:
+
+```bash
+cd $SCM_ROOT/scm/bin
+./run_scm.py -c fluxnet_US-Whs -s SCM_GFS_v16
+```
+
+## How the forcings are derived
+
+- geostrophic winds from geopotential height gradients across the 3x3 stencil
+- omega converted to vertical velocity (`w_ls`) with MetPy thermodynamic relations
+- horizontal and vertical advective tendencies of `thetal` and `qt` computed on
+  the stencil with spherical metric factors
+- `dT_dt_rad` diagnosed as a column-mean heating rate from the TOA and surface
+  net flux difference
+
+### Known limitations
+
+- **Soil and land-surface state comes from the GABLS3 template**, not from the
+  site. Soil temperature and moisture, vegetation and soil type, and albedo are
+  all inherited, so they will not reflect conditions at a given Fluxnet site.
+  Override them per site before drawing conclusions about surface fluxes.
+- `dT_dt_rad` is a bulk column-mean value; ERA5's archived fluxes are boundary
+  values, so the vertical structure of radiative heating cannot be recovered
+  from them. DEPHY cases set `radiation = "on"`, so the SCM computes radiation
+  internally and ignores this field.
+- Geostrophic winds are undefined at the equator and unreliable near it.
 
 ## CCPP-SCM input data
 
@@ -63,7 +169,7 @@ The group names are `forcing`, `initial`, and `scalars`, with a root group that 
 - `T_nudge ('levels', 'time')` :  absolute temperature to nudge toward ( K )
 - `thil_nudge ('levels', 'time')` :  potential temperature to nudge toward ( K )
 - `qt_nudge ('levels', 'time')` :  q_t to nudge toward ( kg kg^-1 )
-- `dT_dt_rad ('levels', 'time')` :  prescribed radiative heating rate ( K s^-1 )
+- `dT_dt_rad ('levels', 'time')` :  prescribed radiative heating rate ( K s^-1, zero-filled if radiative inputs are missing )
 - `h_advec_thetail ('levels', 'time')` :  prescribed theta_il tendency due to horizontal advection ( K s^-1 )
 - `v_advec_thetail ('levels', 'time')` :  prescribed theta_il tendency due to vertical advection ( K s^-1 )
 - `h_advec_qt ('levels', 'time')` :  prescribed q_t tendency due to horizontal advection ( kg kg^-1 s^-1 )

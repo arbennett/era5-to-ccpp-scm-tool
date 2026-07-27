@@ -5,24 +5,67 @@ import metpy.constants
 from metpy.units import units
 
 
-def calculate_radiative_heating(swnet_top, swdn_sfc, lwnet_top, lwdn_sfc, pressure, temperature):
+#: Gravitational acceleration (m s-2) and dry-air specific heat (J kg-1 K-1).
+_GRAVITY = 9.80665
+_CP_DRY = 1004.6
+
+
+def calculate_radiative_heating(swnet_top, swnet_sfc, lwnet_top, lwnet_sfc,
+                                pressure, surface_pressure=None):
     """
-    Calculate radiative heating rate profile (K/s).
+    Diagnose a column-mean radiative heating rate profile (K/s).
+
+    The net radiative flux convergence of the whole atmospheric column is
+
+        Q = (swnet_top + lwnet_top) - (swnet_sfc + lwnet_sfc)      [W m-2]
+
+    using ERA5's sign convention, in which all four terms are positive
+    downward.  Distributing that convergence uniformly in mass over the column
+    gives
+
+        dT/dt = g * Q / (c_p * (p_surface - p_top))                [K s-1]
 
     Parameters
     ----------
-    swnet_top, swdn_sfc, lwnet_top, lwdn_sfc : array-like, shape (time,)
-    pressure : array-like, shape (levels,) — Pa
-    temperature : array-like, shape (time, levels) — K
+    swnet_top, swnet_sfc, lwnet_top, lwnet_sfc : array-like, shape (time,)
+        Net shortwave and longwave fluxes at the top of the atmosphere and at
+        the surface, in W m-2 (ERA5 ``tsr``, ``ssr``, ``ttr``, ``str``).
+    pressure : array-like, shape (levels,)
+        Pressure levels in Pa.
+    surface_pressure : array-like, shape (time,), optional
+        Surface pressure in Pa.  Defaults to the highest pressure level.
+
+    Returns
+    -------
+    numpy.ndarray, shape (time, levels)
+
+    Notes
+    -----
+    This is a bulk column diagnostic, not a resolved heating profile: ERA5's
+    archived fluxes are boundary values only, so the vertical structure of the
+    heating cannot be recovered from them.  It is a fallback for the legacy
+    grouped output format.  DEPHY cases written by this tool set
+    ``radiation = "on"``, which makes the SCM compute radiation internally and
+    ignore any prescribed rate.
     """
     pressure = np.asarray(pressure, dtype=float)
-    dT_dt_rad = np.zeros((swnet_top.shape[0], pressure.shape[0]))
-    for t in range(swnet_top.shape[0]):
-        dT_dt_rad[t, :] = (
-            (swnet_top[t] - swdn_sfc[t] + lwnet_top[t] - lwdn_sfc[t])
-            / (pressure * temperature[t, :])
-        )
-    return dT_dt_rad
+    swnet_top = np.asarray(swnet_top, dtype=float)
+    swnet_sfc = np.asarray(swnet_sfc, dtype=float)
+    lwnet_top = np.asarray(lwnet_top, dtype=float)
+    lwnet_sfc = np.asarray(lwnet_sfc, dtype=float)
+
+    column_convergence = (swnet_top + lwnet_top) - (swnet_sfc + lwnet_sfc)
+
+    p_top = float(pressure.min())
+    if surface_pressure is None:
+        p_sfc = np.full_like(column_convergence, float(pressure.max()))
+    else:
+        p_sfc = np.asarray(surface_pressure, dtype=float)
+
+    depth = np.maximum(p_sfc - p_top, 1.0)  # guard against a degenerate column
+    heating = _GRAVITY * column_convergence / (_CP_DRY * depth)  # (time,)
+
+    return np.repeat(heating[:, None], pressure.shape[0], axis=1)
 
 
 def calculate_grid_spacing(lats, lons, center_idx=1):
@@ -223,10 +266,17 @@ def calculate_advection(var, u, v, omega, lats, lons, pressure, earth_radius=6_3
 
 
 def era5_to_scm_forcing(ds):
-    # Convert pressure coordinate to Pa if provided in hPa
+    # Convert pressure coordinate to Pa if provided in hPa.  Scaling a
+    # coordinate DataArray rescales its values but leaves the original hPa
+    # coordinate attached, so it has to be re-indexed onto its own new values.
+    # Without this, every later operation that mixes `pressure_levels` with a
+    # variable off `ds` aligns two disjoint level coordinates and silently
+    # produces a padded outer join.
     pressure_levels = ds.levels
     if float(pressure_levels.max()) < 2000.0:
         pressure_levels = pressure_levels * 100.0
+    pressure_levels = pressure_levels.assign_coords(levels=pressure_levels.values)
+    pressure_levels.attrs["units"] = "Pa"
     ds = ds.assign_coords(levels=pressure_levels)
 
     out = xr.Dataset(coords={"time": ds.time, "levels": pressure_levels})
@@ -238,6 +288,7 @@ def era5_to_scm_forcing(ds):
     except Exception:
         geopotential_height = ds.z / 9.80665
     u_g, v_g = calculate_geostrophic_wind(geopotential_height, ds.latitude.values, ds.longitude.values)
+    zh_center = geopotential_height.isel(latitude=1, longitude=1, drop=True)  # (time, levels)
 
     # Convert omega (Pa/s) to w (m/s) for the w_ls output variable
     omega_center = ds.w.isel(latitude=1, longitude=1, drop=True) * units.Pa / units.second
@@ -283,16 +334,17 @@ def era5_to_scm_forcing(ds):
     h_advec_qt    = _make_da(h_advec_qt_np)
     v_advec_qt    = _make_da(v_advec_qt_np)
 
-    # Radiative tendency
+    # Radiative tendency.  Note the bracket indexing for "str": ds.str would
+    # resolve to xarray's string accessor, not the surface net thermal flux.
     dT_dt_rad = np.zeros((ds.sizes["time"], ds.sizes["levels"]))
     if all(vname in ds.variables for vname in ("tsr", "ssr", "ttr", "str")):
         dT_dt_rad = calculate_radiative_heating(
-            ds.tsr.isel(latitude=1, longitude=1).values,
-            ds.ssr.isel(latitude=1, longitude=1).values,
-            ds.ttr.isel(latitude=1, longitude=1).values,
-            ds.str.isel(latitude=1, longitude=1).values,
+            ds["tsr"].isel(latitude=1, longitude=1).values,
+            ds["ssr"].isel(latitude=1, longitude=1).values,
+            ds["ttr"].isel(latitude=1, longitude=1).values,
+            ds["str"].isel(latitude=1, longitude=1).values,
             pressure_levels.values,
-            ds.t.isel(latitude=1, longitude=1).values,
+            surface_pressure=ds["sp"].isel(latitude=1, longitude=1).values,
         )
 
     # Liquid water potential temperature at center for thil_nudge
@@ -322,6 +374,7 @@ def era5_to_scm_forcing(ds):
         dims=("levels", "time"),
         coords={"levels": pressure_levels, "time": ds.time},
     )
+    out["zh"]        = zh_center.transpose("levels", "time")
     out["p_surf"]    = ds.sp.isel(latitude=1, longitude=1)
     out["T_surf"]    = ds.t2m.isel(latitude=1, longitude=1)
     out["latitude"]  = xr.DataArray(float(ds.latitude.values[1]))
@@ -329,6 +382,7 @@ def era5_to_scm_forcing(ds):
 
     # Variable attributes
     var_attrs = {
+        'zh':                {'units': 'm',              'long_name': 'geopotential height'},
         'p_surf':            {'units': 'Pa',             'long_name': 'surface pressure'},
         'T_surf':            {'units': 'K',              'long_name': 'surface absolute temperature'},
         'w_ls':              {'units': 'm s^-1',         'long_name': 'large scale vertical velocity'},
