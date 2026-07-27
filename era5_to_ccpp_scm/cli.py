@@ -88,13 +88,30 @@ def _core_convert_forcings(
     ``era5_rad_file`` is only needed for older extractions that kept them in a
     third file.
     """
-    parts = [_maybe_open(era5_surface_file)]
+    # Datasets opened from a path are ours to close.  Reading them eagerly and
+    # releasing the handles keeps the returned object independent of the files
+    # it came from: otherwise the result stays lazily backed by open handles,
+    # and a later open of the same path in the same process fails with an HDF
+    # error.
+    opened = []
+
+    def _open(source):
+        dataset = _maybe_open(source)
+        if isinstance(source, str):
+            opened.append(dataset)
+        return dataset
+
+    parts = [_open(era5_surface_file)]
     if era5_rad_file is not None:
-        parts.append(_maybe_open(era5_rad_file))
-    parts.append(_maybe_open(era5_pressure_levels_file))
+        parts.append(_open(era5_rad_file))
+    parts.append(_open(era5_pressure_levels_file))
     # The inputs hold disjoint variables, so no_conflicts is both the safe
     # choice and the one that flags an unexpected overlap instead of hiding it.
-    ds = xr.merge(parts, compat="no_conflicts")
+    try:
+        ds = xr.merge(parts, compat="no_conflicts").load()
+    finally:
+        for dataset in opened:
+            dataset.close()
 
     rename_map = {}
     if "valid_time" in ds.dims or "valid_time" in ds.coords:
@@ -163,20 +180,31 @@ def _core_convert_era5_from_template(
         template_index = template_index.drop_vars("time")
     template_index = template_index.assign_coords({"time": new_time})
 
-    # Write forcing variables by matching template var shapes/dims.
-    forcing_out = template_forcing.copy(deep=True)
+    # Build the forcing group on the *case's* time axis.  Copying the template
+    # group and assigning into it aligns the template's own time coordinate
+    # (145 steps for GABLS3) against the case's, which fails for every case
+    # that is not exactly as long as the template.  The template contributes
+    # variable names, dtypes and attributes; the values come from ERA5.
+    forcing_vars = {}
     for var in template_forcing.data_vars:
-        if var not in era5_ds:
-            continue
-        da = era5_ds[var]
-        if set(template_forcing[var].dims).issubset(set(da.dims)):
-            da = da.transpose(*template_forcing[var].dims)
-            forcing_out[var] = xr.DataArray(
-                da.values.astype(template_forcing[var].dtype, copy=False),
-                dims=template_forcing[var].dims,
-                coords={d: forcing_out.coords[d] for d in template_forcing[var].dims if d in forcing_out.coords},
-                attrs=template_forcing[var].attrs,
-            )
+        dims = template_forcing[var].dims
+        if var in era5_ds and set(dims).issubset(set(era5_ds[var].dims)):
+            values = era5_ds[var].transpose(*dims).values
+        else:
+            # Not derivable from ERA5; leave it zeroed on the case's axes
+            # rather than carrying the template's unrelated time series.
+            values = np.zeros(tuple(era5_ds.sizes[d] for d in dims))
+        forcing_vars[var] = xr.DataArray(
+            values.astype(template_forcing[var].dtype, copy=False),
+            dims=dims,
+            attrs=template_forcing[var].attrs,
+        )
+
+    forcing_out = xr.Dataset(
+        forcing_vars,
+        coords={"time": new_time, "levels": template_index["levels"]},
+    )
+    forcing_out.time.attrs = era5_ds.time.attrs
 
     # Update scalar lat/lon if present from processed forcing output.
     if "lat" in template_scalars and "latitude" in era5_ds:
@@ -224,6 +252,10 @@ def _core_convert_to_dephy(
     deposit output files directly into an SCM directory tree.
     """
     era5_ds = _maybe_open(era5_processed_forcings)
+    if isinstance(era5_processed_forcings, str):
+        # Read it now and let go of the handle; see _core_convert_forcings.
+        with era5_ds:
+            era5_ds = era5_ds.load()
 
     convert_to_dephy(
         era5_processed=era5_ds,

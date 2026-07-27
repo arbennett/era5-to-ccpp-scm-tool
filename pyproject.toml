@@ -10,6 +10,7 @@ authors = [
     { name = "Andrew Bennett", email = "andrbenn@arizona.edu" },
 ]
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.0.0",
@@ -40,9 +41,20 @@ notebooks = [
 test = [
     "pytest>=8.0",
 ]
+# Regenerating the JOSS manuscript figures.
+paper = [
+    "matplotlib>=3.10.1",
+]
 
 [project.scripts]
 era5-scm-tool = "era5_to_ccpp_scm.cli:cli"  # This makes your script executable
 
 [tool.hatch.build.targets.wheel]
 packages = ["era5_to_ccpp_scm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    "error::DeprecationWarning:era5_to_ccpp_scm.*",
+]

@@ -17,7 +17,7 @@ Static fields (soil, ozone, land-surface properties) are seeded from the
 gabls3_noahmp template and can be overridden per site via the scalars dict.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -443,9 +443,9 @@ def _parse_date(date_str: str) -> datetime:
 
 
 def _np64_to_datetime(np64) -> datetime:
-    """Convert a numpy datetime64 scalar to a Python datetime."""
+    """Convert a numpy datetime64 scalar to a naive UTC Python datetime."""
     ts = (np64 - np.datetime64("1970-01-01T00:00:00")) / np.timedelta64(1, "s")
-    return datetime.utcfromtimestamp(float(ts))
+    return datetime.fromtimestamp(float(ts), timezone.utc).replace(tzinfo=None)
 
 
 def _interp_ozone(tpl_index: xr.Dataset, tpl_initial: xr.Dataset,

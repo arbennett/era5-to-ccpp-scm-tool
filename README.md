@@ -4,11 +4,24 @@ Builds ready-to-run [CCPP-SCM](https://ccpp-scm.readthedocs.io/en/latest/)
 cases from ERA5 reanalysis for any point on the globe. Output is written in
 DEPHY format and validated against CCPP-SCM v7.0.0.
 
+Single-column models need large-scale forcing — advective tendencies, vertical
+motion, geostrophic winds — that has traditionally been assembled by hand for
+each study, which is why community case libraries hold only a few dozen curated
+field-campaign cases. This tool generates a case for an arbitrary location and
+period in one command, reading ERA5 from a public archive that needs no account
+or API key.
+
 ## Installation
 For now this tool can only be installed from source. To install it, clone the repository and run the following command in the root directory of the repository:
 
 ```bash
 pip install .
+```
+
+For a development install, including the test dependencies:
+
+```bash
+uv sync --extra test
 ```
 
 ## Usage
@@ -146,10 +159,47 @@ cd $SCM_ROOT/scm/bin
   internally and ignores this field.
 - Geostrophic winds are undefined at the equator and unreliable near it.
 
-## CCPP-SCM input data
+## Testing
+
+The test suite is network-free — it runs against a small ERA5 extraction
+committed under `casegen_walnut_gulch/data`, so it works offline:
+
+```bash
+uv run pytest
+```
+
+## Contributing and support
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report a bug, ask a question,
+or submit a change. Issues and questions go to the
+[issue tracker](https://github.com/arbennett/era5-to-ccpp-scm-tool/issues).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `era5_to_ccpp_scm/` | The installed package |
+| `tests/` | Test suite |
+| `examples/` | Shell examples for each subcommand |
+| `scripts/` | Batch driver for many AmeriFlux sites |
+| `contrib/derecho/` | Unsupported user scripts for NSF NCAR Derecho |
+| `casegen_walnut_gulch/` | A worked example case, with test data |
+| `paper/` | JOSS manuscript |
+
+---
+
+## Appendix: the legacy grouped input format
+
+Everything below documents the **older** grouped NetCDF layout written by
+`convert_era5_from_template`. Current SCM releases read DEPHY, so this is kept
+only for backward compatibility — use `convert_to_dephy` for new work.
 
 ### Overall structure
-The CCPP-SCM input data is organized in a single netcdf file with multiple groups.
+The legacy CCPP-SCM input data is organized in a single netcdf file with multiple groups.
 The group names are `forcing`, `initial`, and `scalars`, with a root group that I call `index`.
 
 ### Index data

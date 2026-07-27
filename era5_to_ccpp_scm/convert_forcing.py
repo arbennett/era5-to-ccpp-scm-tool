@@ -9,6 +9,24 @@ from metpy.units import units
 _GRAVITY = 9.80665
 _CP_DRY = 1004.6
 
+#: ERA5 archives radiative fluxes as hourly accumulations in J m-2.
+_SECONDS_PER_ACCUMULATION = 3600.0
+
+
+def _as_flux_rate(da):
+    """Return a radiative flux as a rate in W m-2.
+
+    The downloader already divides the accumulated forecast stream by its
+    accumulation period, but files produced by the older CDS-based workflow
+    carry raw hourly accumulations in J m-2.  Both reach
+    :func:`calculate_radiative_heating`, which needs W m-2, so the accumulated
+    form is normalised here rather than at each call site.
+    """
+    units = str(da.attrs.get("units", "")).replace(" ", "").replace("*", "")
+    if units in ("Jm-2", "Jm^-2", "Jm**-2"):
+        return da / _SECONDS_PER_ACCUMULATION
+    return da
+
 
 def calculate_radiative_heating(swnet_top, swnet_sfc, lwnet_top, lwnet_sfc,
                                 pressure, surface_pressure=None):
@@ -338,11 +356,14 @@ def era5_to_scm_forcing(ds):
     # resolve to xarray's string accessor, not the surface net thermal flux.
     dT_dt_rad = np.zeros((ds.sizes["time"], ds.sizes["levels"]))
     if all(vname in ds.variables for vname in ("tsr", "ssr", "ttr", "str")):
+        def _flux(name):
+            return _as_flux_rate(ds[name].isel(latitude=1, longitude=1)).values
+
         dT_dt_rad = calculate_radiative_heating(
-            ds["tsr"].isel(latitude=1, longitude=1).values,
-            ds["ssr"].isel(latitude=1, longitude=1).values,
-            ds["ttr"].isel(latitude=1, longitude=1).values,
-            ds["str"].isel(latitude=1, longitude=1).values,
+            _flux("tsr"),
+            _flux("ssr"),
+            _flux("ttr"),
+            _flux("str"),
             pressure_levels.values,
             surface_pressure=ds["sp"].isel(latitude=1, longitude=1).values,
         )
