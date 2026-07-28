@@ -10,7 +10,7 @@ from .util import _maybe_open
 from typing import Union, Optional
 from .download_era5 import download_era5_time_series
 from .convert_forcing import era5_to_scm_forcing
-from .to_dephy import convert_to_dephy, write_case_namelist
+from .to_dephy import convert_to_dephy, override_land_state, write_case_namelist
 
 
 @click.group()
@@ -22,8 +22,37 @@ def cli():
      3. convert_era5_from_template  (legacy grouped-format output)
      4. convert_to_dephy            (DEPHY format for direct SCM use)
      5. run_full_pipeline
+     6. set_land_state              (patch a finished case's land descriptors)
     """
     pass
+
+
+_VEGTYP_HELP = (
+    "Vegetation type to use instead of the ERA5 land cover. Accepts an IGBP "
+    "class number (1-20), an IGBP class name, or a FLUXNET/AmeriFlux code such "
+    "as GRA or DBF. ERA5 land cover is a 0.25 degree field, so a site's own "
+    "published class is preferable wherever it is known."
+)
+_SOILTYP_HELP = (
+    "Soil type to use instead of the ERA5 soil texture. Accepts a STATSGO "
+    "class number (1-19) or a class name such as 'sandy loam'."
+)
+#: Roughness length carried by the packaged template, used only when neither
+#: the caller nor the ERA5 land state supplies one.
+_TEMPLATE_ROUGHNESS_CM = 15.0
+
+_ROUGHNESS_HELP = (
+    "Surface roughness length in cm. Defaults to the ERA5 value at the site "
+    "when the land group was downloaded, and to the template value otherwise. "
+    "The case namelist is kept consistent with whichever is used."
+)
+
+_TRANSFER_HELP = (
+    "How to carry ERA5 soil moisture onto the Noah soil parameters. "
+    "'relative' preserves the degree of saturation between wilting point and "
+    "porosity, which preserves the evaporative regime across the two soil "
+    "parameter tables. 'direct' copies the volumetric value and clamps it."
+)
 
 
 _SOURCE_HELP = ("Which copy of the NSF NCAR ERA5 archive to read: 'aws' for "
@@ -45,6 +74,10 @@ _SOURCE_HELP = ("Which copy of the NSF NCAR ERA5 archive to read: 'aws' for "
                    '3x3 stencil and damp noise in horizontal gradients.')
 @click.option('--no_radiation', is_flag=True, default=False,
               help='Skip the accumulated radiative fluxes.')
+@click.option('--no_land', is_flag=True, default=False,
+              help='Skip the soil, snow, albedo and land-cover fields. The '
+                   'land surface will then be initialised from the case '
+                   'template rather than from ERA5.')
 @click.option('--max_workers', type=int, default=8,
               help='Number of worker processes (work is split by variable).')
 def download_era5(
@@ -57,6 +90,7 @@ def download_era5(
     source: str,
     stencil_step: int,
     no_radiation: bool,
+    no_land: bool,
     max_workers: int,
 ):
     """
@@ -72,6 +106,7 @@ def download_era5(
         source=source,
         stencil_step=stencil_step,
         include_radiation=not no_radiation,
+        include_land=not no_land,
         max_workers=max_workers,
     )
 
@@ -80,13 +115,18 @@ def _core_convert_forcings(
     era5_pressure_levels_file: Union[str, xr.Dataset],
     output_file: Optional[str]=None,
     era5_rad_file: Union[str, xr.Dataset, None]=None,
+    era5_invariant_file: Union[str, xr.Dataset, None]=None,
+    vegtyp: Optional[str]=None,
+    soiltyp: Optional[str]=None,
+    soil_moisture_transfer: str='relative',
 ):
     """
     Merge raw ERA5 files and derive the SCM forcing fields.
 
     The downloader folds the radiative fluxes into the surface file, so
     ``era5_rad_file`` is only needed for older extractions that kept them in a
-    third file.
+    third file.  ``era5_invariant_file`` carries the land cover and soil
+    texture classes; without it those fall back to the case template.
     """
     # Datasets opened from a path are ours to close.  Reading them eagerly and
     # releasing the handles keeps the returned object independent of the files
@@ -107,8 +147,15 @@ def _core_convert_forcings(
     parts.append(_open(era5_pressure_levels_file))
     # The inputs hold disjoint variables, so no_conflicts is both the safe
     # choice and the one that flags an unexpected overlap instead of hiding it.
+    # The invariant file is kept out of the merge: it has no time axis, and
+    # only the land state derivation needs it.
+    invariant = None
+    if era5_invariant_file is not None:
+        invariant = _open(era5_invariant_file)
     try:
         ds = xr.merge(parts, compat="no_conflicts").load()
+        if invariant is not None:
+            invariant = invariant.load()
     finally:
         for dataset in opened:
             dataset.close()
@@ -124,7 +171,15 @@ def _core_convert_forcings(
     if rename_map:
         ds = ds.rename(rename_map)
 
-    out = era5_to_scm_forcing(ds)
+    out = era5_to_scm_forcing(
+        ds,
+        invariant=invariant,
+        land_options={
+            'vegtyp': vegtyp,
+            'soiltyp': soiltyp,
+            'soil_moisture_transfer': soil_moisture_transfer,
+        },
+    )
     if output_file is not None:
         out.to_netcdf(output_file, format="NETCDF4")
     return out
@@ -138,17 +193,31 @@ def _core_convert_forcings(
               help='Optional separate radiative-flux file. Only needed for '
                    'older extractions; the downloader now writes the fluxes '
                    'into the surface file.')
+@click.option('-i', '--era5_invariant_file', type=str, default=None,
+              help='Time-invariant ERA5 file (*_inv.nc) holding the land '
+                   'cover and soil texture classes.')
+@click.option('--vegtyp', type=str, default=None, help=_VEGTYP_HELP)
+@click.option('--soiltyp', type=str, default=None, help=_SOILTYP_HELP)
+@click.option('--soil_moisture_transfer',
+              type=click.Choice(['relative', 'direct']), default='relative',
+              help=_TRANSFER_HELP)
 def convert_forcings(
     era5_surface_file: Union[str, xr.Dataset],
     era5_pressure_levels_file: Union[str, xr.Dataset],
     output_file: Optional[str]=None,
     era5_rad_file: Union[str, xr.Dataset, None]=None,
+    era5_invariant_file: Union[str, xr.Dataset, None]=None,
+    vegtyp: Optional[str]=None,
+    soiltyp: Optional[str]=None,
+    soil_moisture_transfer: str='relative',
 ):
     """
     Convert ERA5 data to intermediate SCM forcing file.
     """
     return _core_convert_forcings(era5_surface_file, era5_pressure_levels_file,
-                                  output_file, era5_rad_file)
+                                  output_file, era5_rad_file,
+                                  era5_invariant_file, vegtyp, soiltyp,
+                                  soil_moisture_transfer)
 
 
 def _core_convert_era5_from_template(
@@ -242,7 +311,7 @@ def _core_convert_to_dephy(
     output_file: str,
     template: str = 'gabls3',
     column_area: float = 145_000_000.0,
-    sfc_roughness_length_cm: float = 15.0,
+    sfc_roughness_length_cm: Optional[float] = None,
     namelist_file: Optional[str] = None,
     scm_cases_dir: Optional[str] = None,
     scm_config_dir: Optional[str] = None,
@@ -250,12 +319,26 @@ def _core_convert_to_dephy(
     """
     Core logic: convert processed ERA5 forcings to DEPHY format and optionally
     deposit output files directly into an SCM directory tree.
+
+    ``sfc_roughness_length_cm`` defaults to whatever the land state carries,
+    falling back to the template value.  Passing it explicitly overrides both,
+    and the namelist is kept consistent with whichever value is used.
     """
     era5_ds = _maybe_open(era5_processed_forcings)
     if isinstance(era5_processed_forcings, str):
         # Read it now and let go of the handle; see _core_convert_forcings.
         with era5_ds:
             era5_ds = era5_ds.load()
+
+    scalars_override = {}
+    if sfc_roughness_length_cm is not None:
+        scalars_override = {'zorl': sfc_roughness_length_cm,
+                            'zorll': sfc_roughness_length_cm}
+        roughness = sfc_roughness_length_cm
+    elif 'zorl' in era5_ds:
+        roughness = float(era5_ds['zorl'].values)
+    else:
+        roughness = _TEMPLATE_ROUGHNESS_CM
 
     convert_to_dephy(
         era5_processed=era5_ds,
@@ -264,8 +347,7 @@ def _core_convert_to_dephy(
         case_name=case_name,
         template_name=template,
         column_area=column_area,
-        scalars_override={'zorl': sfc_roughness_length_cm,
-                          'zorll': sfc_roughness_length_cm},
+        scalars_override=scalars_override,
     )
 
     # Write companion .nml file
@@ -277,7 +359,7 @@ def _core_convert_to_dephy(
     write_case_namelist(
         case_name=case_name,
         output_file=namelist_file,
-        sfc_roughness_length_cm=sfc_roughness_length_cm,
+        sfc_roughness_length_cm=roughness,
         column_area=column_area,
     )
 
@@ -306,8 +388,8 @@ def _core_convert_to_dephy(
               help='Template name for static fields (default: gabls3)')
 @click.option('--column_area', type=float, default=145_000_000.0,
               help='Grid-cell area in m² (default: 145000000.0)')
-@click.option('--sfc_roughness_length_cm', type=float, default=15.0,
-              help='Surface roughness length in cm (default: 15.0)')
+@click.option('--sfc_roughness_length_cm', type=float, default=None,
+              help=_ROUGHNESS_HELP)
 @click.option('--namelist_file', type=str, default=None,
               help='Path for output .nml file (default: adjacent to output_file)')
 @click.option('--scm_cases_dir', type=str, default=None,
@@ -321,7 +403,7 @@ def convert_to_dephy_cmd(
     output_file: str,
     template: str,
     column_area: float,
-    sfc_roughness_length_cm: float,
+    sfc_roughness_length_cm: Optional[float],
     namelist_file: Optional[str],
     scm_cases_dir: Optional[str],
     scm_config_dir: Optional[str],
@@ -365,12 +447,20 @@ def convert_to_dephy_cmd(
               help='Number of worker processes for the download.')
 @click.option('--column_area', type=float, default=145_000_000.0,
               help='Grid-cell area in m²')
-@click.option('--sfc_roughness_length_cm', type=float, default=15.0,
-              help='Surface roughness length in cm')
+@click.option('--sfc_roughness_length_cm', type=float, default=None,
+              help=_ROUGHNESS_HELP)
 @click.option('--scm_cases_dir', type=str, default=None,
               help='If set, install *_SCM_driver.nc into this directory')
 @click.option('--scm_config_dir', type=str, default=None,
               help='If set, install *.nml into this directory')
+@click.option('--no_land', is_flag=True, default=False,
+              help='Initialise the land surface from the case template '
+                   'instead of from ERA5.')
+@click.option('--vegtyp', type=str, default=None, help=_VEGTYP_HELP)
+@click.option('--soiltyp', type=str, default=None, help=_SOILTYP_HELP)
+@click.option('--soil_moisture_transfer',
+              type=click.Choice(['relative', 'direct']), default='relative',
+              help=_TRANSFER_HELP)
 def run_full_pipeline(
     start_date: str,
     end_date: str,
@@ -383,9 +473,13 @@ def run_full_pipeline(
     stencil_step: int = 1,
     max_workers: int = 8,
     column_area: float = 145_000_000.0,
-    sfc_roughness_length_cm: float = 15.0,
+    sfc_roughness_length_cm: Optional[float] = None,
     scm_cases_dir: Optional[str] = None,
     scm_config_dir: Optional[str] = None,
+    no_land: bool = False,
+    vegtyp: Optional[str] = None,
+    soiltyp: Optional[str] = None,
+    soil_moisture_transfer: str = 'relative',
 ):
     """
     Full pipeline: download ERA5 → convert forcings → write DEPHY SCM driver.
@@ -393,6 +487,7 @@ def run_full_pipeline(
     Writes into output_dir:
       {case_name}_pl.nc         — raw ERA5 pressure-level data
       {case_name}_sfc.nc        — raw ERA5 surface data
+      {case_name}_inv.nc        — raw ERA5 time-invariant land descriptors
       {case_name}_SCM_driver.nc — DEPHY-format SCM input (ready for run_scm.py)
       {case_name}.nml           — SCM case-config namelist
     """
@@ -400,6 +495,7 @@ def run_full_pipeline(
 
     era5_pl_file  = os.path.join(output_dir, f'{case_name}_pl.nc')
     era5_sfc_file = os.path.join(output_dir, f'{case_name}_sfc.nc')
+    era5_inv_file = os.path.join(output_dir, f'{case_name}_inv.nc')
     dephy_file    = os.path.join(output_dir, f'{case_name}_SCM_driver.nc')
     nml_file      = os.path.join(output_dir, f'{case_name}.nml')
 
@@ -413,11 +509,18 @@ def run_full_pipeline(
         name=case_name,
         source=source,
         stencil_step=stencil_step,
+        include_land=not no_land,
         max_workers=max_workers,
     )
 
     print('--- Step 2/3: Converting ERA5 to SCM forcings ---')
-    era5_processed = _core_convert_forcings(era5_sfc_file, era5_pl_file)
+    era5_processed = _core_convert_forcings(
+        era5_sfc_file, era5_pl_file,
+        era5_invariant_file=era5_inv_file if os.path.exists(era5_inv_file) else None,
+        vegtyp=vegtyp,
+        soiltyp=soiltyp,
+        soil_moisture_transfer=soil_moisture_transfer,
+    )
 
     print('--- Step 3/3: Writing DEPHY output ---')
     _core_convert_to_dephy(
@@ -433,6 +536,57 @@ def run_full_pipeline(
         scm_config_dir=scm_config_dir,
     )
     print('--- Done ---')
+
+
+@cli.command(name='set_land_state')
+@click.option('-f', '--driver_file', type=str, required=True,
+              help='Existing *_SCM_driver.nc to patch')
+@click.option('-o', '--output_file', type=str, default=None,
+              help='Where to write the patched file (default: in place)')
+@click.option('--vegtyp', type=str, default=None, help=_VEGTYP_HELP)
+@click.option('--soiltyp', type=str, default=None, help=_SOILTYP_HELP)
+@click.option('--vegfrac', type=float, default=None,
+              help='Vegetation fraction, 0-1')
+@click.option('--shdmin', type=float, default=None,
+              help='Minimum (annual) green vegetation fraction, 0-1')
+@click.option('--shdmax', type=float, default=None,
+              help='Maximum (annual) green vegetation fraction, 0-1')
+@click.option('--slopetyp', type=float, default=None, help='Slope type, 1-9')
+@click.option('--zorl', type=float, default=None,
+              help='Composite surface roughness length in cm')
+@click.option('--zorll', type=float, default=None,
+              help='Surface roughness length over land in cm')
+@click.option('--snoalb', type=float, default=None,
+              help='Maximum snow albedo, 0-1')
+@click.option('--tg3', type=float, default=None,
+              help='Deep soil temperature in K')
+@click.option('--canopy', type=float, default=None,
+              help='Canopy-intercepted water in kg m-2')
+@click.option('--facsf', type=float, default=None,
+              help='Fractional coverage with strong cosz dependency')
+@click.option('--facwf', type=float, default=None,
+              help='Fractional coverage with weak cosz dependency')
+def set_land_state(driver_file: str, output_file: Optional[str], **overrides):
+    """
+    Patch land surface descriptors in a finished DEPHY driver file.
+
+    ERA5 describes land cover and soil texture at 0.25 degrees, which is coarse
+    next to an eddy covariance footprint. Where a site publishes its own
+    classification this replaces the derived value without repeating the
+    download and conversion.
+
+    Vegetation type accepts a FLUXNET code, so a case can be pinned to the
+    descriptor published with the tower:
+
+        era5-scm-tool set_land_state -f fluxnet_US-Whs_SCM_driver.nc \\
+            --vegtyp OSH --soiltyp 'sandy loam'
+    """
+    supplied = {k: v for k, v in overrides.items() if v is not None}
+    if not supplied:
+        raise click.UsageError(
+            "Give at least one field to change, for example --vegtyp GRA."
+        )
+    override_land_state(driver_file, output_file, **supplied)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,15 @@ LINEWIDTH = 1.8
 #: flatten everything of interest in the troposphere.
 P_TOP = 20000.0
 
+#: Output steps dropped from the flux panels and the quoted statistics. Step 0
+#: is the initial state, and step 1 carries a transient left by starting Noah
+#: from a surface that HTESSEL equilibrated.
+SPINUP_STEPS = 2
+
+#: Downward shortwave at the surface, W m-2, above which an hour counts as
+#: daylight for the evaporative fraction.
+DAYLIGHT_SW = 20.0
+
 
 def style(ax, title, xlabel, ylabel=None):
     ax.set_title(title, color=INK, fontweight="bold", pad=6)
@@ -65,6 +74,11 @@ def style(ax, title, xlabel, ylabel=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scm-root", default=DEFAULT_SCM_ROOT)
+    parser.add_argument("--case-prefix", default="era5land",
+                        help="Case-name prefix to plot. 'era5land' are the "
+                             "cases with the land surface initialised from "
+                             "ERA5; 'fluxnet' are the earlier template-soil "
+                             "cases.")
     args = parser.parse_args()
 
     case_dir = os.path.join(args.scm_root, "scm", "data", "processed_case_input")
@@ -73,10 +87,12 @@ def main():
     drivers, outputs = {}, {}
     for site, _, _ in SITES:
         drivers[site] = xr.open_dataset(
-            os.path.join(case_dir, f"fluxnet_{site}_SCM_driver.nc"),
+            os.path.join(case_dir,
+                         f"{args.case_prefix}_{site}_SCM_driver.nc"),
             decode_times=False)
         outputs[site] = xr.open_dataset(
-            os.path.join(run_dir, f"output_fluxnet_{site}_SCM_GFS_v16",
+            os.path.join(run_dir,
+                         f"output_{args.case_prefix}_{site}_SCM_GFS_v16",
                          "output.nc"))
 
     fig, axes = plt.subplots(2, 3, figsize=(7.4, 5.0))
@@ -100,25 +116,32 @@ def main():
         ax.invert_yaxis()
         ax.set_ylim(1000, 200)
 
-    # Soil temperature: identical between sites, because it comes from the
-    # template rather than the site. Offset the second line so the overlap is
-    # visible rather than hidden.
+    # Soil temperature, taken from ERA5 at each site. The gradient reverses
+    # between the two cases, which is the seasonal signal that a single
+    # template cannot carry; the template profile is drawn for reference.
     ax = axes[0, 2]
-    for index, (site, label, color) in enumerate(SITES):
+    for site, label, color in SITES:
         ds = drivers[site]
-        depth = ds["soil_depth"].values
-        stc = ds["stc"].values[0]
-        ax.plot(stc, depth, color=color, linewidth=LINEWIDTH,
-                linestyle="-" if index == 0 else (0, (3, 2.5)),
-                marker="o", markersize=4, label=label, zorder=3 + index)
+        ax.plot(ds["stc"].values[0], ds["soil_depth"].values, color=color,
+                linewidth=LINEWIDTH, marker="o", markersize=4, label=label,
+                zorder=4)
+
+    template = os.path.join(case_dir, "fluxnet_US-Whs_SCM_driver.nc")
+    if os.path.exists(template):
+        with xr.open_dataset(template, decode_times=False) as tpl:
+            ax.plot(tpl["stc"].values[0], tpl["soil_depth"].values,
+                    color=INK_MUTED, linewidth=1.0, linestyle=(0, (3, 2.5)),
+                    marker="s", markersize=3, label="GABLS3 template",
+                    zorder=3)
+
     style(ax, "(c)  Initial soil $T$", "K", "depth (m)")
     ax.invert_yaxis()
-    ax.text(0.5, 0.06,
-            "identical — inherited\nfrom the GABLS3 template",
-            transform=ax.transAxes, ha="center", va="bottom",
-            fontsize=7, color=INK_MUTED, style="italic",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor=SURFACE,
-                      edgecolor=GRID, linewidth=0.6), zorder=5)
+    handles, labels = ax.get_legend_handles_labels()
+    keep = [(h, l) for h, l in zip(handles, labels) if "template" in l]
+    if keep:
+        ax.legend([h for h, _ in keep], [l for _, l in keep], frameon=False,
+                  fontsize=6.5, loc="lower left", handlelength=1.8,
+                  borderpad=0.2)
 
     # ------------------------------------------------------------------
     # Bottom row — CCPP-SCM output
@@ -131,13 +154,14 @@ def main():
     for ax, varname, title, units in panels:
         for site, label, color in SITES:
             ds = outputs[site]
-            hours = ds["time_inst"].values / 3600.0
-            ax.plot(hours, np.asarray(ds[varname].squeeze().values),
-                    color=color, linewidth=LINEWIDTH, label=label, zorder=3)
-        style(ax, title, "hours since 00 UTC",
+            hours = ds["time_inst"].values[SPINUP_STEPS:] / 3600.0
+            series = np.asarray(ds[varname].squeeze().values)[SPINUP_STEPS:]
+            ax.plot(hours, series, color=color, linewidth=LINEWIDTH,
+                    label=label, zorder=3)
+        style(ax, title, "hours since 00 UTC on the start date",
               units if varname != "hpbl" else "m")
-        ax.set_xlim(0, 24)
-        ax.set_xticks([0, 6, 12, 18, 24])
+        ax.set_xlim(0, 120)
+        ax.set_xticks([0, 24, 48, 72, 96, 120])
 
     axes[1, 0].axhline(0.0, color=INK_MUTED, linewidth=0.7, zorder=2)
 
@@ -148,20 +172,55 @@ def main():
     fig.tight_layout(rect=(0, 0.055, 1, 1))
     fig.subplots_adjust(hspace=0.42, wspace=0.38)
 
-    out = os.path.join(HERE, "case_study.png")
+    # The manuscript figure is the ERA5-initialised one; plotting the earlier
+    # template-soil cases for comparison must not overwrite it.
+    stem = "case_study" if args.case_prefix == "era5land" \
+        else f"case_study_{args.case_prefix}"
+    out = os.path.join(HERE, f"{stem}.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     print(f"wrote {out}")
 
     # Numbers quoted in the manuscript text.
+    #
+    # The flux comparison is taken over the first simulated day. Beyond that
+    # the column drifts: these cases carry no nudging, so nothing relaxes the
+    # free troposphere back toward the reanalysis, and by day three the US-MMS
+    # sensible heat flux is negative even at midday. The drift diagnostic below
+    # reports that directly, as the change in daily-mean air temperature at the
+    # lowest model level between the first and last simulated day.
+    #
+    # The evaporative fraction is restricted to daylight hours. The nocturnal
+    # sensible heat flux is strongly negative, so an all-hours ratio has a
+    # denominator that approaches zero and stops being a fraction at all.
+    print(f"--- day 1, cold-start steps excluded ({args.case_prefix}) ---")
     for site, label, _ in SITES:
         ds = outputs[site]
-        shf = np.asarray(ds["shf"].squeeze().values)[1:]
-        lhf = np.asarray(ds["lhf"].squeeze().values)[1:]
-        ef = lhf.mean() / (lhf.mean() + shf.mean())
-        print(f"{site}: mean SHF {shf.mean():6.1f}  mean LHF {lhf.mean():6.1f}"
-              f"  peak LHF {lhf.max():6.1f}  evaporative fraction {ef:.2f}"
-              f"  peak PBL {float(ds['hpbl'].max()):.0f} m")
+        shf = np.asarray(ds["shf"].squeeze().values)
+        lhf = np.asarray(ds["lhf"].squeeze().values)
+        pbl = np.asarray(ds["hpbl"].squeeze().values)
+        swd = np.asarray(ds["sfc_dwn_sw"].squeeze().values)
 
+        first = slice(SPINUP_STEPS, 25)
+        day = swd[first] > DAYLIGHT_SW
+        ef = lhf[first][day].sum() / (lhf[first] + shf[first])[day].sum()
+        print(f"{site}: mean SHF {shf[first].mean():6.1f}"
+              f"  mean LHF {lhf[first].mean():6.1f}"
+              f"  peak LHF {lhf[first].max():6.1f}"
+              f"  daylight evaporative fraction {ef:.2f}"
+              f"  peak PBL {pbl[first].max():.0f} m")
+
+    print(f"--- five-day drift ({args.case_prefix}) ---")
+    for site, label, _ in SITES:
+        ds = outputs[site]
+        air = np.asarray(ds["T"].squeeze().values)[:, 0]
+        lhf = np.asarray(ds["lhf"].squeeze().values)
+        shf = np.asarray(ds["shf"].squeeze().values)
+        first_day = air[SPINUP_STEPS:24].mean()
+        last_day = air[96:120].mean()
+        print(f"{site}: lowest-level air T {first_day:.1f} -> {last_day:.1f} K "
+              f"({last_day - first_day:+.1f} K over five days), "
+              f"peak SHF day 1 {shf[SPINUP_STEPS:24].max():.0f} -> "
+              f"day 5 {shf[96:120].max():.0f} W m-2")
 
 if __name__ == "__main__":
     main()

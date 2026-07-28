@@ -33,6 +33,9 @@ import xarray as xr
 
 from .era5_catalog import (
     GLADE_ROOT,
+    INVARIANT_VARIABLES,
+    INVARIANT_YYYYMM,
+    LAND_VARIABLES,
     PRESSURE_VARIABLES,
     RADIATION_VARIABLES,
     S3_BUCKET,
@@ -331,10 +334,37 @@ def _read_accumulated(archive, short_name, variable, start, end,
     return out
 
 
+def _read_invariant(archive, short_name, variable, start, end,
+                    stencils) -> Dict[str, xr.DataArray]:
+    """Read a time-invariant field for every site.
+
+    The invariant stream holds a single file per variable covering the whole
+    record, so ``start`` and ``end`` are accepted for signature compatibility
+    with the other readers and are not used to select it.  The degenerate
+    length-one time dimension is dropped.
+    """
+    token = f"{variable.stream}.{variable.code}.{variable.grid}."
+    names = [n for n in archive.listdir(variable.stream, INVARIANT_YYYYMM)
+             if n.startswith(token)]
+    if not names:
+        raise _missing_files_error(short_name, variable, start, end)
+
+    with _open_dataset(archive, variable.stream, INVARIANT_YYYYMM,
+                       sorted(names)[0]) as ds:
+        field = ds[variable.nc_name]
+        out = {}
+        for site, da in _read_all_stencils(field, stencils).items():
+            if "time" in da.dims:
+                da = da.isel(time=0, drop=True)
+            out[site] = da.rename(short_name)
+    return out
+
+
 #: Dispatch table for :func:`_worker`; keys are passed as the ``kind`` argument.
 _READERS = {
     "instantaneous": _read_instantaneous,
     "accumulated": _read_accumulated,
+    "invariant": _read_invariant,
 }
 
 #: One archive handle per worker process, built lazily on first use.
@@ -396,6 +426,7 @@ def download_era5_sites(
     source: str = "auto",
     stencil_step: int = 1,
     include_radiation: bool = True,
+    include_land: bool = True,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     per_site_subdir: bool = True,
 ):
@@ -427,6 +458,12 @@ def download_era5_sites(
         computed horizontal gradients.
     include_radiation : bool
         Also fetch accumulated radiative fluxes from the forecast stream.
+    include_land : bool
+        Also fetch the soil, snow, albedo and land-cover fields needed to
+        initialise the land surface model from ERA5 rather than from the
+        packaged template.  The soil and snow fields join the surface file;
+        the land-cover and soil-texture classes are written to a third,
+        time-invariant file.
     max_workers : int
         Number of worker processes; work is divided by variable.
     per_site_subdir : bool
@@ -436,7 +473,9 @@ def download_era5_sites(
     Returns
     -------
     dict
-        ``{site_id: (pressure_level_path, surface_path)}``.
+        ``{site_id: (pressure_level_path, surface_path)}`` when ``include_land``
+        is False, otherwise ``{site_id: (pressure_level_path, surface_path,
+        invariant_path)}``.
     """
     stencil_coords = _normalise_sites(sites)
     if not stencil_coords:
@@ -475,6 +514,16 @@ def download_era5_sites(
         rad_by_site = _fetch_group(source, RADIATION_VARIABLES, start, end,
                                    stencils, "accumulated", max_workers)
 
+    land_by_site = {}
+    inv_by_site = {}
+    if include_land:
+        print(f"  land surface: {', '.join(sorted(LAND_VARIABLES))}")
+        land_by_site = _fetch_group(source, LAND_VARIABLES, start, end,
+                                    stencils, "instantaneous", max_workers)
+        print(f"  invariant: {', '.join(sorted(INVARIANT_VARIABLES))}")
+        inv_by_site = _fetch_group(source, INVARIANT_VARIABLES, start, end,
+                                   stencils, "invariant", max_workers)
+
     written = {}
     for site, (lat, lon) in stencil_coords.items():
         pl = pl_by_site[site]
@@ -490,6 +539,12 @@ def download_era5_sites(
                 tolerance=np.timedelta64(1, "h"),
             )
             sfc = xr.merge([sfc, rad], combine_attrs="drop_conflicts")
+
+        if site in land_by_site:
+            # The land fields come off the same analysis stream on the same
+            # times, so they merge into the surface file without alignment.
+            sfc = xr.merge([sfc, land_by_site[site]],
+                           combine_attrs="drop_conflicts")
 
         provenance = {
             "source": f"NSF NCAR ERA5 (RDA ds633.0) via {backend}",
@@ -514,7 +569,16 @@ def download_era5_sites(
         _drop_helper_coords(sfc).to_netcdf(sfc_path)
         print(f"  wrote {pl_path}")
         print(f"  wrote {sfc_path}")
-        written[site] = (pl_path, sfc_path)
+
+        if site in inv_by_site:
+            inv = inv_by_site[site]
+            inv.attrs.update(provenance)
+            inv_path = os.path.join(site_dir, f"{site}_inv.nc")
+            _drop_helper_coords(inv).to_netcdf(inv_path)
+            print(f"  wrote {inv_path}")
+            written[site] = (pl_path, sfc_path, inv_path)
+        else:
+            written[site] = (pl_path, sfc_path)
 
     return written
 
@@ -529,14 +593,16 @@ def download_era5_time_series(
     source: str = "auto",
     stencil_step: int = 1,
     include_radiation: bool = True,
+    include_land: bool = True,
     max_workers: int = _DEFAULT_MAX_WORKERS,
 ):
     """Extract a 3x3 ERA5 column stencil for one site.
 
-    Writes ``{output_dir}/{name}_pl.nc`` and ``{output_dir}/{name}_sfc.nc``
-    and returns the two paths.  See :func:`download_era5_sites` for the
-    argument meanings; for more than one site call that function directly, as
-    it amortises the file reads across sites.
+    Writes ``{output_dir}/{name}_pl.nc`` and ``{output_dir}/{name}_sfc.nc``,
+    plus ``{output_dir}/{name}_inv.nc`` when ``include_land`` is set, and
+    returns those paths.  See :func:`download_era5_sites` for the argument
+    meanings; for more than one site call that function directly, as it
+    amortises the file reads across sites.
     """
     written = download_era5_sites(
         {name: (lat, lon)},
@@ -546,6 +612,7 @@ def download_era5_time_series(
         source=source,
         stencil_step=stencil_step,
         include_radiation=include_radiation,
+        include_land=include_land,
         max_workers=max_workers,
         per_site_subdir=False,
     )

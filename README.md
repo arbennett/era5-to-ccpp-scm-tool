@@ -55,9 +55,11 @@ era5-scm-tool download_era5 \
   --source aws
 ```
 
-This writes `US-Whs_pl.nc` (pressure-level) and `US-Whs_sfc.nc` (surface plus
-radiative fluxes), each holding the 3x3 grid stencil centred on the site that
-the forcing calculation needs for horizontal gradients.
+This writes `US-Whs_pl.nc` (pressure-level), `US-Whs_sfc.nc` (surface,
+radiative fluxes, and the soil, snow and albedo fields used to initialise the
+land surface) and `US-Whs_inv.nc` (time-invariant land cover and soil texture).
+The first two hold the 3x3 grid stencil centred on the site that the forcing
+calculation needs for horizontal gradients.
 
 #### A note on cost, and why you should batch sites
 
@@ -94,7 +96,8 @@ era5-scm-tool convert_forcings --help
 Example usage:
 
 ```bash
-era5-scm-tool convert_forcings -s era5_sfc.nc -p era5_pl.nc -o ccpp_scm_forcing.nc
+era5-scm-tool convert_forcings -s era5_sfc.nc -p era5_pl.nc -i era5_inv.nc \
+  -o ccpp_scm_forcing.nc
 ```
 
 ### Writing the SCM case (DEPHY format)
@@ -147,12 +150,67 @@ cd $SCM_ROOT/scm/bin
 - `dT_dt_rad` diagnosed as a column-mean heating rate from the TOA and surface
   net flux difference
 
+## How the land surface is initialised
+
+Soil, snow, albedo and land-cover state are taken from ERA5 at the site. ERA5
+is produced with the HTESSEL land surface model, so its state has to be
+reconciled with Noah before the SCM can use it:
+
+- **Soil layers.** HTESSEL's interfaces are at 7, 28, 100 and 289 cm against
+  Noah's 10, 40, 100 and 200 cm, so profiles are remapped by overlap weighting,
+  which conserves the depth integral.
+- **Soil moisture.** The two models assign different porosities and wilting
+  points to the same soil. The default transfer preserves the degree of
+  saturation between wilting point and porosity rather than the volumetric
+  water content, because that ratio is what Noah's water stress factor is
+  computed from. Use `--soil_moisture_transfer direct` for a clamped raw copy.
+- **Frozen soil.** ERA5 archives total soil water; the liquid fraction is
+  recovered from the freezing-point depression implied by the receiving soil's
+  Clapp-Hornberger curve.
+- **Classification.** HTESSEL land cover and soil texture are mapped onto the
+  IGBP and STATSGO classes that the GFS physics reads (`ivegsrc = 1`,
+  `isot = 1`). Green vegetation fraction is the ERA5 cover fraction closed by
+  leaf area index, which supplies the seasonal cycle the cover fractions lack.
+
+Skin temperature, deep soil temperature, snow water equivalent and depth, snow
+cover, canopy water, the four albedo components and the roughness length are
+taken from ERA5 directly. Fields ERA5 has no counterpart for (maximum snow
+albedo, the `facsf`/`facwf` weights, friction velocity) still come from the
+template. Every field records where it came from in the `land_state_source`
+global attribute of the driver file.
+
+### Overriding the site descriptors
+
+ERA5 land cover is a 0.25 degree field, which is coarse next to a flux-tower
+footprint. Where a site publishes its own classification, use it. Vegetation
+type accepts an IGBP number, an IGBP class name, or a FLUXNET/AmeriFlux code:
+
+```bash
+# when building the case
+era5-scm-tool run_full_pipeline ... --vegtyp OSH --soiltyp 'sandy loam'
+
+# or afterwards, without repeating the download
+era5-scm-tool set_land_state -f fluxnet_US-Whs_SCM_driver.nc \
+    --vegtyp OSH --soiltyp 'sandy loam'
+```
+
+`set_land_state` also takes `--vegfrac`, `--shdmin`, `--shdmax`, `--slopetyp`,
+`--zorl`, `--zorll`, `--snoalb`, `--tg3`, `--canopy`, `--facsf` and `--facwf`,
+writes in place unless given `-o`, and records the change in both
+`land_state_source` and the DEPHY `modifications` attribute.
+
+Pass `--no_land` to skip the land download entirely and fall back to the
+template, which reproduces the behaviour of releases before this feature.
+
 ### Known limitations
 
-- **Soil and land-surface state comes from the GABLS3 template**, not from the
-  site. Soil temperature and moisture, vegetation and soil type, and albedo are
-  all inherited, so they will not reflect conditions at a given Fluxnet site.
-  Override them per site before drawing conclusions about surface fluxes.
+- Land cover and soil texture come from ERA5's 0.25 degree grid unless
+  overridden, which is coarse relative to a flux-tower footprint.
+- Soil moisture transferred between the HTESSEL and Noah parameter tables is
+  better read as an equivalent wetness than as a measured water content.
+- Noah starts from a surface equilibrated by a different land surface model,
+  which at some sites leaves a transient in the surface fluxes over the first
+  model step. Discard it; lengthening the spinup does not remove it.
 - `dT_dt_rad` is a bulk column-mean value; ERA5's archived fluxes are boundary
   values, so the vertical structure of radiative heating cannot be recovered
   from them. DEPHY cases set `radiation = "on"`, so the SCM computes radiation

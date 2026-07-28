@@ -1,8 +1,16 @@
+import json
+
 import numpy as np
 import xarray as xr
 import metpy.calc as mpcalc
 import metpy.constants
 from metpy.units import units
+
+from .land_state import (
+    LAND_SCALAR_VARS,
+    SOIL_PROFILE_VARS,
+    derive_land_state,
+)
 
 
 #: Gravitational acceleration (m s-2) and dry-air specific heat (J kg-1 K-1).
@@ -283,7 +291,25 @@ def calculate_advection(var, u, v, omega, lats, lons, pressure, earth_radius=6_3
     return h_advec, v_advec
 
 
-def era5_to_scm_forcing(ds):
+def era5_to_scm_forcing(ds, invariant=None, land_options=None):
+    """Derive the SCM forcing fields, and the land state where available.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Merged ERA5 surface and pressure-level extraction.  When it also
+        carries the land surface fields (``stl1``-``stl4``, ``swvl1``-``swvl4``
+        and friends) the initial land state is derived alongside the forcings
+        and attached to the result, so the intermediate file describes the
+        whole case rather than the atmosphere alone.
+    invariant : xr.Dataset, optional
+        Time-invariant extraction holding the land cover and soil texture
+        classes.  Without it the classes fall back to the template.
+    land_options : dict, optional
+        Passed through to :func:`~era5_to_ccpp_scm.land_state.derive_land_state`;
+        recognised keys are ``soil_moisture_transfer``, ``vegtyp`` and
+        ``soiltyp``.
+    """
     # Convert pressure coordinate to Pa if provided in hPa.  Scaling a
     # coordinate DataArray rescales its values but leaves the original hPa
     # coordinate attached, so it has to be re-indexed onto its own new values.
@@ -425,4 +451,69 @@ def era5_to_scm_forcing(ds):
         if var in var_attrs:
             out[var].attrs = var_attrs[var]
 
+    _attach_land_state(out, ds, invariant, land_options or {})
+
     return out
+
+
+#: Units and descriptions for the land state fields carried on the intermediate.
+_LAND_ATTRS = {
+    "stc":     {'units': 'K',        'long_name': 'initial soil temperature profile'},
+    "smc":     {'units': 'm3 m-3',   'long_name': 'initial total soil moisture profile'},
+    "slc":     {'units': 'm3 m-3',   'long_name': 'initial liquid soil moisture profile'},
+    "tsfco":   {'units': 'K',        'long_name': 'surface skin temperature'},
+    "tsfcl":   {'units': 'K',        'long_name': 'land surface skin temperature'},
+    "tisfc":   {'units': 'K',        'long_name': 'ice surface skin temperature'},
+    "tg3":     {'units': 'K',        'long_name': 'deep soil temperature'},
+    "weasd":   {'units': 'mm',       'long_name': 'water equivalent snow depth'},
+    "snowd":   {'units': 'mm',       'long_name': 'physical snow depth'},
+    "sncovr":  {'units': '1',        'long_name': 'snow area fraction'},
+    "snoalb":  {'units': '1',        'long_name': 'maximum snow albedo'},
+    "canopy":  {'units': 'kg m-2',   'long_name': 'canopy-intercepted water'},
+    "alvsf":   {'units': '1',        'long_name': 'visible albedo, strong cosz dependency'},
+    "alvwf":   {'units': '1',        'long_name': 'visible albedo, weak cosz dependency'},
+    "alnsf":   {'units': '1',        'long_name': 'near infrared albedo, strong cosz dependency'},
+    "alnwf":   {'units': '1',        'long_name': 'near infrared albedo, weak cosz dependency'},
+    "vegfrac": {'units': '1',        'long_name': 'vegetation fraction'},
+    "shdmin":  {'units': '1',        'long_name': 'minimum vegetation fraction'},
+    "shdmax":  {'units': '1',        'long_name': 'maximum vegetation fraction'},
+    "vegtyp":  {'units': '1',        'long_name': 'IGBP vegetation type'},
+    "soiltyp": {'units': '1',        'long_name': 'STATSGO soil type'},
+    "slmsk":   {'units': '1',        'long_name': 'land-sea-ice mask'},
+    "zorl":    {'units': 'cm',       'long_name': 'composite surface roughness length'},
+    "zorll":   {'units': 'cm',       'long_name': 'surface roughness length over land'},
+}
+
+
+def _attach_land_state(out, ds, invariant, land_options):
+    """Derive the land surface state and add it to the forcing dataset.
+
+    The soil profiles arrive on an ``nsoil`` dimension and the rest as scalars,
+    which keeps the intermediate file a complete description of the case.  A
+    record of where each field came from is stored as a global attribute so the
+    provenance survives the round trip through NetCDF.
+    """
+    state = derive_land_state(ds, invariant, **land_options)
+    if state is None:
+        out.attrs["land_state_source"] = (
+            "none; this extraction carries no ERA5 land fields, so land "
+            "surface state falls back to the case template"
+        )
+        return
+
+    provenance = state.pop("provenance", {})
+
+    for name in SOIL_PROFILE_VARS:
+        if name in state:
+            out[name] = xr.DataArray(
+                np.asarray(state[name], dtype=np.float64), dims=("nsoil",),
+                attrs=_LAND_ATTRS.get(name, {}),
+            )
+
+    for name in LAND_SCALAR_VARS:
+        if name in state:
+            out[name] = xr.DataArray(
+                float(state[name]), attrs=_LAND_ATTRS.get(name, {}),
+            )
+
+    out.attrs["land_state_source"] = json.dumps(provenance, sort_keys=True)

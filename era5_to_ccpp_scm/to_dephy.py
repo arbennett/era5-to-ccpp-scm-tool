@@ -13,10 +13,17 @@ The DEPHY format (version 1) is a flat NetCDF-4 file (no groups) with:
                                 area, lat(time), lon(time)
   - Global attributes matching gabls3_noahmp style for a land+LSM case
 
-Static fields (soil, ozone, land-surface properties) are seeded from the
-gabls3_noahmp template and can be overridden per site via the scalars dict.
+Soil, snow, albedo and land-cover fields are taken from the ERA5 extraction
+where it carries them, which it does whenever the download included the land
+group.  Anything ERA5 cannot supply falls back to the gabls3_noahmp template,
+and an explicit override supplied by the caller supersedes both.  Which field
+came from where is recorded in the ``land_state_source`` global attribute.
+
+Ozone is always seeded from the template, since ERA5's total column ozone
+cannot be resolved into a profile.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +31,14 @@ import numpy as np
 import xarray as xr
 
 from . import templates
+from .land_state import (
+    IGBP_CLASS_NAMES,
+    LAND_SCALAR_VARS,
+    SOIL_PROFILE_VARS,
+    STATSGO_CLASS_NAMES,
+    parse_soil_type,
+    parse_vegetation_type,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,20 +180,37 @@ def convert_to_dephy(
         if source_name in tpl_scalars:
             data_vars[sv] = tpl_scalars[source_name].astype(np.float64)
 
-    # Override surface skin temperature with ERA5 value at t=0
-    t_surf_init = float(era5_processed["T_surf"].values[0])
-    for skin_var in ("tsfco", "tsfcl"):
-        if skin_var in data_vars:
-            data_vars[skin_var] = xr.DataArray(
-                t_surf_init,
-                attrs=data_vars[skin_var].attrs,
+    # Precedence runs template < ERA5 < caller override.  Fields ERA5 cannot
+    # supply keep the template value, so a partial land state is usable.
+    provenance = _load_provenance(era5_processed)
+
+    for sv in _SCALAR_VARS:
+        if sv in LAND_SCALAR_VARS and sv in era5_processed:
+            data_vars[sv] = xr.DataArray(
+                float(era5_processed[sv].values),
+                attrs=data_vars[sv].attrs if sv in data_vars else {},
             )
+
+    if "tsfcl" not in era5_processed:
+        # Without a land state there is no skin temperature to use, so the
+        # 2 m temperature stands in as it did before the land group existed.
+        t_surf_init = float(era5_processed["T_surf"].values[0])
+        for skin_var in ("tsfco", "tsfcl"):
+            if skin_var in data_vars:
+                data_vars[skin_var] = xr.DataArray(
+                    t_surf_init, attrs=data_vars[skin_var].attrs,
+                )
+                provenance[skin_var] = "ERA5 t2m (no skin temperature available)"
 
     # Apply any caller-supplied overrides
     if scalars_override:
         for sv, val in scalars_override.items():
             if sv in data_vars:
                 data_vars[sv] = xr.DataArray(float(val), attrs=data_vars[sv].attrs)
+                provenance[sv] = "user override"
+
+    for sv in _SCALAR_VARS:
+        provenance.setdefault(sv, f"{template_name} template")
 
     data_vars["area"] = xr.DataArray(
         float(column_area),
@@ -251,16 +283,21 @@ def convert_to_dephy(
                "standard_name": "mole_fraction_of_ozone_in_air"},
     )
 
-    # Soil initial conditions from template (Noah LSM, 4 layers)
+    # Soil initial conditions: ERA5 where the extraction carries them, and the
+    # template otherwise.
     for sv, sname, sunits in [
         ("stc", "initial profile of soil temperature", "K"),
-        ("smc", "initial profile of soil moisture",    "kg"),
-        ("slc", "initial profile of soil liquid moisture", "kg"),
+        ("smc", "initial profile of soil moisture",    "m3 m-3"),
+        ("slc", "initial profile of soil liquid moisture", "m3 m-3"),
     ]:
-        if sv in tpl_initial:
+        if sv in era5_processed:
+            vals = era5_processed[sv].values.reshape(1, _NSOIL).astype(np.float64)
+        elif sv in tpl_initial:
             vals = tpl_initial[sv].values.reshape(1, _NSOIL).astype(np.float64)
+            provenance[sv] = f"{template_name} template"
         else:
             vals = np.zeros((1, _NSOIL), dtype=np.float64)
+            provenance[sv] = "zero fill"
         data_vars[sv] = xr.DataArray(
             vals, dims=["t0", "nsoil"],
             attrs={"units": sunits, "standard_name": sname},
@@ -362,6 +399,8 @@ def convert_to_dephy(
         "surface_forcing_moisture": "none",
         "surface_forcing_wind": "none",
         "surface_forcing_lsm": "lsm",
+        # Which land surface fields are site-derived and which are inherited.
+        "land_state_source": json.dumps(provenance, sort_keys=True),
     }
 
     # ------------------------------------------------------------------
@@ -379,6 +418,11 @@ def convert_to_dephy(
 
     ds_out.to_netcdf(output_file, encoding=encoding, format="NETCDF4_CLASSIC")
     print(f"  Wrote DEPHY file: {output_file}")
+
+    inherited = sorted(k for k, v in provenance.items() if "template" in v)
+    if inherited:
+        print(f"  Land fields inherited from the {template_name} template: "
+              f"{', '.join(inherited)}")
 
 
 def write_case_namelist(
@@ -428,9 +472,131 @@ def write_case_namelist(
     print(f"  Wrote namelist:   {output_file}")
 
 
+#: Fields :func:`override_land_state` will patch, and how each is interpreted.
+#: Vegetation and soil types accept class names and FLUXNET codes as well as
+#: numbers; everything else is a plain float.
+_OVERRIDABLE = {
+    "vegtyp": parse_vegetation_type,
+    "soiltyp": parse_soil_type,
+    "vegfrac": float,
+    "shdmin": float,
+    "shdmax": float,
+    "slopetyp": float,
+    "zorl": float,
+    "zorll": float,
+    "snoalb": float,
+    "tg3": float,
+    "canopy": float,
+    "facsf": float,
+    "facwf": float,
+}
+
+
+def override_land_state(driver_file: str, output_file: Optional[str] = None,
+                        **overrides) -> dict:
+    """Patch land surface descriptors in a finished DEPHY driver file.
+
+    ERA5 describes land cover and soil texture at 0.25 degrees, which is a
+    coarse descriptor of an eddy covariance footprint.  Where a site publishes
+    its own classification, this replaces the derived value without rerunning
+    the download and conversion, which for a long case is by far the expensive
+    part.
+
+    Vegetation type accepts an IGBP class number, an IGBP class name, or a
+    FLUXNET/AmeriFlux abbreviation such as ``GRA`` or ``DBF``, so a site's
+    published descriptor can be used directly.  Soil type accepts a STATSGO
+    class number or name.
+
+    Parameters
+    ----------
+    driver_file : str
+        Path to an existing ``*_SCM_driver.nc``.
+    output_file : str, optional
+        Where to write the patched file.  Defaults to editing in place.
+    **overrides
+        Any of the fields in :data:`_OVERRIDABLE`.
+
+    Returns
+    -------
+    dict
+        The values actually written, after parsing.
+
+    Examples
+    --------
+    Pin a case to the IGBP class published for the flux tower::
+
+        override_land_state("fluxnet_US-Whs_SCM_driver.nc", vegtyp="OSH")
+    """
+    unknown = sorted(set(overrides) - set(_OVERRIDABLE))
+    if unknown:
+        raise ValueError(
+            f"Cannot override {', '.join(unknown)}; this function handles "
+            f"{', '.join(sorted(_OVERRIDABLE))}."
+        )
+    if not overrides:
+        raise ValueError("No overrides given.")
+
+    with xr.open_dataset(driver_file) as opened:
+        ds = opened.load()
+
+    provenance = _load_provenance(ds)
+    applied = {}
+
+    for name, raw in overrides.items():
+        if raw is None:
+            continue
+        value = _OVERRIDABLE[name](raw)
+        attrs = ds[name].attrs if name in ds else {}
+        ds[name] = xr.DataArray(np.float64(value), attrs=attrs)
+        provenance[name] = "user override"
+        applied[name] = value
+
+    ds.attrs["land_state_source"] = json.dumps(provenance, sort_keys=True)
+    ds.attrs["modifications"] = _append_modification(
+        ds.attrs.get("modifications", ""),
+        "land surface overrides: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(applied.items())),
+    )
+
+    destination = output_file or driver_file
+    encoding = {v: {"dtype": "float64"} for v in ds.data_vars
+                if ds[v].dtype.kind == "f"}
+    ds.to_netcdf(destination, encoding=encoding, format="NETCDF4_CLASSIC")
+
+    for name, value in sorted(applied.items()):
+        label = ""
+        if name == "vegtyp":
+            label = f" ({IGBP_CLASS_NAMES[int(value)]})"
+        elif name == "soiltyp":
+            label = f" ({STATSGO_CLASS_NAMES[int(value)]})"
+        print(f"  {name} -> {value}{label}")
+    print(f"  Wrote {destination}")
+
+    return applied
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _load_provenance(source) -> dict:
+    """Read the land state provenance record, tolerating its absence."""
+    raw = source.attrs.get("land_state_source") if hasattr(source, "attrs") else None
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _append_modification(existing: str, note: str) -> str:
+    """Append a note to the DEPHY ``modifications`` attribute."""
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"{stamp}: {note}"
+    return f"{existing}; {entry}" if existing else entry
+
 
 def _parse_date(date_str: str) -> datetime:
     """Accept 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'."""

@@ -9,7 +9,7 @@ tags:
   - parameterization
 authors:
   # PLACEHOLDER: confirm ORCIDs and affiliations before submission.
-  - name: Andrew R. Bennett
+  - name: Andrew Bennett
     orcid: 0000-0000-0000-0000
     corresponding: true
     affiliation: 1
@@ -54,7 +54,7 @@ libraries that the community shares consist of a few dozen curated field
 campaign cases.
 
 `era5-to-ccpp-scm-tool` is a Python package and command line tool that builds
-SCM cases from ERA5 reanalysis [@hersbach2020] for any location on the globe.
+SCM cases for the CCPP-SCM from ERA5 reanalysis [@hersbach2020] for any location on the globe.
 Given a latitude, longitude, and date range, it extracts the reanalysis fields
 that are needed, derives the full set of large-scale forcing terms, and writes
 a case in the DEPHY format [@dephy] along with its configuration namelist, so
@@ -135,7 +135,7 @@ two tools to be complementary rather than competing.
 # Methods
 
 ERA5 and a DEPHY case file differ in nearly every convention, and the
-conversions between them fall into five broad groups.
+conversions between them fall into six broad groups.
 
 The first group concerns coordinates and indexing. ERA5 latitudes are stored
 north first, so a northward gradient is computed as the difference between the
@@ -145,8 +145,8 @@ meridian, and pressure levels arrive in hPa and are re-indexed onto their
 converted values rather than simply rescaled.
 
 The second group concerns time. The accumulated radiative fluxes are archived
-as hourly totals in J m$^{-2}$ and are divided by the accumulation period to
-give rates in W m$^{-2}$. Those fluxes come from a forecast stream dimensioned
+as hourly totals in $J/m^{2}$ and are divided by the accumulation period to
+give rates in $W/m^{2}$. Those fluxes come from a forecast stream dimensioned
 by forecast initial time and forecast hour, which is flattened onto valid time
 to give a continuous hourly series. The absolute timestamps that ERA5 carries
 are then converted to seconds since the start of the case, which is the
@@ -155,7 +155,7 @@ convention DEPHY uses.
 The third group is thermodynamic. Temperature and specific humidity are
 converted to liquid water potential temperature and total water specific
 humidity, the pressure velocity that ERA5 archives is converted to a vertical
-velocity in m s$^{-1}$ using the thermodynamic relations provided by MetPy, and
+velocity in $m/s$ using the thermodynamic relations provided by MetPy, and
 geopotential is converted to geopotential height.
 
 The fourth group is dynamical. Geostrophic winds are computed from the
@@ -165,6 +165,27 @@ water are computed using three point derivatives on a non-uniform stencil with
 spherical metric factors applied. A column mean radiative heating rate is
 diagnosed from the difference between the net radiative fluxes at the top of
 the atmosphere and at the surface.
+
+The fifth group concerns the land surface. ERA5 is produced with the HTESSEL
+land surface model [@balsamo2009], whose state cannot be handed to Noah or
+Noah-MP unchanged, and reconciling the two requires three separate
+transformations. The four soil layers that HTESSEL carries have interfaces at
+7, 28, 100 and 289 cm against the 10, 40, 100 and 200 cm that Noah uses, so
+soil temperature and moisture are remapped by overlap weighting, which
+conserves the depth integral of the remapped quantity. The two models also
+assign different porosities and wilting points to the same soil, so carrying a
+volumetric water content across unchanged can place it outside the physical
+range of the receiving soil type, and we therefore transfer the degree of
+saturation between the wilting point and the porosity of each parameter set
+rather than the water content itself. This preserves the ratio from which Noah
+computes its water stress factor, and with it the evaporative regime. The
+liquid water fraction that Noah carries separately is recovered from the
+freezing point depression implied by the Clapp-Hornberger retention curve of
+the receiving soil. Land cover and soil texture are mapped from the HTESSEL
+classes onto the IGBP and STATSGO classifications that the GFS physics is
+configured to read, and the green vegetation fraction is obtained by closing
+the ERA5 cover fractions with the leaf area index, which supplies the seasonal
+cycle that the cover fractions themselves lack.
 
 The final group concerns the schema. ERA5 short names are mapped onto DEPHY
 variable names, and the grouped arrays that older CCPP-SCM releases used are
@@ -213,51 +234,96 @@ and 48 s when parallelized in this way.
 
 To demonstrate the full workflow we generated cases at two contrasting
 AmeriFlux sites: US-Whs, a semi-arid shrubland at Walnut Gulch in southern
-Arizona, for 1 January 2019, and US-MMS, a temperate deciduous forest at Morgan
-Monroe in Indiana, for 15 June 2019. Both cases were produced with a single
-invocation of the full pipeline, contained every variable that the reference
-DEPHY case file carries, and ran for 24 hours in CCPP-SCM v7.0.0 under the
-`SCM_GFS_v16` suite without further intervention. \autoref{fig:case} shows the
+Arizona, beginning 1 January 2019, and US-MMS, a temperate deciduous forest at
+Morgan Monroe in Indiana, beginning 15 June 2019. Both cases were produced with
+a single invocation of the full pipeline, contained every variable that the
+reference DEPHY case file carries, and ran for five days in CCPP-SCM v7.0.0
+under the `SCM_GFS_v16` suite without further intervention. \autoref{fig:case} shows the
 initial state that was written into each case file along with the resulting
 simulation.
 
 ![Two cases from generation to simulation. The top row shows the initial state
-written into the DEPHY case files, and the bottom row shows the resulting
-CCPP-SCM simulations. The scripts used to generate this figure are included in
-the repository.\label{fig:case}](case_study.png)
+written into the DEPHY case files, and the bottom row shows five days of the
+resulting CCPP-SCM simulations. Panel (c) also shows the GABLS3 template
+profile that earlier releases supplied to every case regardless of site or
+season. The flux panels begin at the third output step, since starting Noah
+from a surface that HTESSEL equilibrated leaves a transient over the first
+step. The decay of the US-MMS diurnal cycle after the second day is column
+drift rather than a property of the site, and is discussed under limitations.
+The scripts used to generate this figure are included in the
+repository.\label{fig:case}](case_study.png)
 
 The atmospheric initial state is specific to the site and season, with US-MMS
 carrying nearly three times the near-surface total water of US-Whs, at 8.6
-against 3.2 g kg$^{-1}$. The simulated partitioning of the surface energy
-budget follows from this. The daily mean evaporative fraction is 0.76 at the
-forest site against 0.29 at the desert site, peak latent heat fluxes are 447
-and 106 W m$^{-2}$ respectively, and the deeper and more variable daytime
-boundary layer that the model produces at US-MMS is consistent with that
-partitioning.
+against 3.2 $g/kg$. The land surface state is likewise specific to each
+site. The soil temperature profiles shown in the third panel differ between the
+two cases in both magnitude and in the sign of their vertical gradient. The
+January US-Whs profile rises from 280 K in the uppermost layer to 291 K at two
+metres, as the deep soil retains the previous summer's heat, while the June
+US-MMS profile falls from 292 K to 285 K over the same depth.
+Recovering this seasonal reversal follows directly from taking the soil state
+from the reanalysis, since any single template can supply only one of the two.
+The two cases also receive different soil textures, different land cover
+classes, and green vegetation fractions of 0.30 and 0.88.
 
-The initial soil temperature profiles shown in the third panel are identical
-between the two cases, because soil state is currently inherited from the
-GABLS3 template rather than derived at the site, as discussed below. The
-atmospheric contrast in this figure is therefore real, while a soil contrast
-would not be. The sensible heat flux above 300 W m$^{-2}$ that the January
-US-Whs case produces near midday is higher than we would expect for a desert in
-winter, and is plausibly an artifact of a warm template soil. The two sites
-were also run in different seasons, so we present these results as a
-demonstration that the tool resolves differences between sites and seasons
-rather than as a controlled attribution of those differences to vegetation
-type.
+The simulated partitioning of the surface energy budget follows from the
+atmospheric and land states together. Over the first simulated day the
+evaporative fraction, taken over daylight hours, is 0.60 at the forest site
+against 0.21 at the desert site, and peak latent heat fluxes are 305 and 56 $W
+/m^{2}$ respectively. Building the same two cases on the template soil instead
+gives evaporative fractions of 0.65 and 0.20 and peak latent heat fluxes of 447
+and 106 $W / m^{2}$. The magnitude of the latent heat flux therefore responds
+strongly to how the land surface is initialized while the ratio barely moves at
+all, and a study which reported only the evaporative fraction would have
+concluded that the choice hardly mattered. The template carries a soil moisture
+saturation fraction of 0.33 at all four levels, which is close to field capacity,
+together with a vegetation cover of 0.75 that applies all year, and it
+therefore supplies more water to both surfaces than the reanalysis holds at
+either. The two sites were run in different seasons, so we present these
+results as a demonstration that the tool resolves differences between sites and
+seasons rather than as a controlled attribution of those differences to
+vegetation type.
+
+The five day integrations also make the limits of a prescribed-forcing column
+visible. The diurnal cycle is well defined for the first two days at both
+sites, after which the column drifts: air temperature at the lowest model level
+rises by 6 K at US-Whs and by 10 K at US-MMS between the first and last
+simulated day, and the US-MMS sensible heat flux becomes negative even at
+midday from the third day onward. The same drift appears in the template soil
+runs, so it is a property of the case configuration rather than of the land
+initialization, and we return to it below.
 
 # Limitations and future work
 
-Soil and land surface state, which includes soil temperature and moisture,
-vegetation and soil type, and albedo, is currently inherited from the GABLS3
-template rather than taken from the site, because the land surface fields that
-ERA5 archives are not on the four layer Noah-MP soil grid that the model
-expects [@niu2011]. This is the most consequential limitation of the package
-for land-atmosphere work, and until it is addressed users should override these
-fields for each site before drawing conclusions about surface fluxes. We plan
-to add site-specific soil initialization in a subsequent release, and we
-consider it the most valuable contribution that others could make.
+Land surface state is taken from the reanalysis, but three caveats attach to
+the way it gets there. ERA5 describes land cover and soil texture on the same
+0.25 degree grid as everything else, which is coarse next to the footprint of
+an eddy covariance tower, and where a site publishes its own classification we
+expect that to be used instead. The package accepts a vegetation class by its
+FLUXNET abbreviation for exactly this purpose, both when a case is built and as
+a patch applied to a case that has already been written. The HTESSEL and Noah
+parameter tables also differ in ways that transferring the degree of saturation
+reduces without removing, so soil moisture carried between them is better read
+as an equivalent wetness than as a measured water content. Noah moreover begins
+from a surface that was equilibrated by a different land surface model, and at
+some sites this produces a transient in the surface fluxes over the first model
+step, which we recommend discarding and which lengthening the spinup period
+does not remove. A few fields have no ERA5 counterpart at all, among them the
+maximum snow albedo, the fractional coverage weights that divide the albedo
+between its strong and weak zenith angle components, and the friction velocity,
+and these are still inherited from the case template [@niu2011].
+
+A separate limitation concerns how long a case can usefully be run. The cases
+that we write prescribe advective tendencies and geostrophic winds but do not
+nudge the column toward the reanalysis, so nothing relaxes the free troposphere
+back toward the state that the forcing was derived from. Over a day or two this
+is unimportant, and it is the configuration in which most single-column cases
+are used, but over the five day integrations shown here the column warms by
+several degrees and the surface fluxes at US-MMS lose their diurnal signature
+entirely. Users running beyond about two days should expect this, and enabling
+relaxation toward the reanalysis profiles, which the package already derives
+and which the DEPHY format already accommodates, is the natural remedy and the
+next feature we intend to add.
 
 Two further caveats follow from the source data. The radiative heating rate
 that we diagnose is a bulk column mean value, because ERA5 archives radiative
