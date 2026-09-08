@@ -59,6 +59,23 @@ SPINUP_STEPS = 2
 #: daylight for the evaporative fraction.
 DAYLIGHT_SW = 20.0
 
+#: Thickness of each Noah soil layer, m, used to depth-weight the column mean.
+SOIL_THICKNESS = np.array([0.10, 0.30, 0.60, 1.00])
+
+#: Case prefix carrying the template-soil initialisation, drawn alongside the
+#: ERA5-initialised run in the soil panel so the effect of the initial state is
+#: visible rather than asserted.
+COMPARISON_PREFIX = "fluxnet"
+
+#: Shared x-axis label for every time series panel.
+TIME_LABEL = "hours since 00 UTC on the start date"
+
+
+def column_mean_soil_temperature(ds):
+    """Depth-weighted mean soil temperature over the four Noah layers."""
+    soil = np.asarray(ds["soil_T"].squeeze().values)
+    return (soil * SOIL_THICKNESS).sum(axis=1) / SOIL_THICKNESS.sum()
+
 
 def style(ax, title, xlabel, ylabel=None):
     ax.set_title(title, color=INK, fontweight="bold", pad=6)
@@ -95,6 +112,26 @@ def main():
                          f"output_{args.case_prefix}_{site}_SCM_GFS_v16",
                          "output.nc"))
 
+    # The soil panel draws the template-soil run alongside, where it exists.
+    comparison = {}
+    if args.case_prefix != COMPARISON_PREFIX:
+        for site, _, _ in SITES:
+            path = os.path.join(
+                run_dir, f"output_{COMPARISON_PREFIX}_{site}_SCM_GFS_v16",
+                "output.nc")
+            if os.path.exists(path):
+                comparison[site] = xr.open_dataset(path)
+
+    # Time axes follow the length of the run, so the same script serves a
+    # two-day case and a month-long one.
+    duration = max(float(ds["time_inst"].values[-1]) / 3600.0
+                   for ds in outputs.values())
+    tick_step = 24.0 if duration <= 144 else 168.0 if duration <= 840 else 240.0
+    xticks = np.arange(0.0, duration + tick_step * 0.5, tick_step)
+    # Hourly fluxes over a month are a dense diurnal band, so the stroke has to
+    # thin out or the envelope fills solid.
+    series_lw = LINEWIDTH if duration <= 144 else 0.6
+
     fig, axes = plt.subplots(2, 3, figsize=(7.4, 5.0))
 
     # ------------------------------------------------------------------
@@ -116,32 +153,20 @@ def main():
         ax.invert_yaxis()
         ax.set_ylim(1000, 200)
 
-    # Soil temperature, taken from ERA5 at each site. The gradient reverses
-    # between the two cases, which is the seasonal signal that a single
-    # template cannot carry; the template profile is drawn for reference.
+    # Soil temperature through the run. The initial state is what this package
+    # newly supplies, so the panel shows how long it goes on mattering rather
+    # than only what it was at hour zero. The template-soil runs are still
+    # loaded, because the statistics printed below quote them, but they are not
+    # drawn: the panel is about the two sites differing from each other.
     ax = axes[0, 2]
     for site, label, color in SITES:
-        ds = drivers[site]
-        ax.plot(ds["stc"].values[0], ds["soil_depth"].values, color=color,
-                linewidth=LINEWIDTH, marker="o", markersize=4, label=label,
-                zorder=4)
+        hours = outputs[site]["time_inst"].values / 3600.0
+        ax.plot(hours, column_mean_soil_temperature(outputs[site]),
+                color=color, linewidth=LINEWIDTH, label=label, zorder=4)
 
-    template = os.path.join(case_dir, "fluxnet_US-Whs_SCM_driver.nc")
-    if os.path.exists(template):
-        with xr.open_dataset(template, decode_times=False) as tpl:
-            ax.plot(tpl["stc"].values[0], tpl["soil_depth"].values,
-                    color=INK_MUTED, linewidth=1.0, linestyle=(0, (3, 2.5)),
-                    marker="s", markersize=3, label="GABLS3 template",
-                    zorder=3)
-
-    style(ax, "(c)  Initial soil $T$", "K", "depth (m)")
-    ax.invert_yaxis()
-    handles, labels = ax.get_legend_handles_labels()
-    keep = [(h, l) for h, l in zip(handles, labels) if "template" in l]
-    if keep:
-        ax.legend([h for h, _ in keep], [l for _, l in keep], frameon=False,
-                  fontsize=6.5, loc="lower left", handlelength=1.8,
-                  borderpad=0.2)
+    style(ax, "(c)  Column-mean soil $T$", TIME_LABEL, "K")
+    ax.set_xlim(0, duration)
+    ax.set_xticks(xticks)
 
     # ------------------------------------------------------------------
     # Bottom row — CCPP-SCM output
@@ -156,12 +181,11 @@ def main():
             ds = outputs[site]
             hours = ds["time_inst"].values[SPINUP_STEPS:] / 3600.0
             series = np.asarray(ds[varname].squeeze().values)[SPINUP_STEPS:]
-            ax.plot(hours, series, color=color, linewidth=LINEWIDTH,
+            ax.plot(hours, series, color=color, linewidth=series_lw,
                     label=label, zorder=3)
-        style(ax, title, "hours since 00 UTC on the start date",
-              units if varname != "hpbl" else "m")
-        ax.set_xlim(0, 120)
-        ax.set_xticks([0, 24, 48, 72, 96, 120])
+        style(ax, title, TIME_LABEL, units if varname != "hpbl" else "m")
+        ax.set_xlim(0, duration)
+        ax.set_xticks(xticks)
 
     axes[1, 0].axhline(0.0, color=INK_MUTED, linewidth=0.7, zorder=2)
 
@@ -180,47 +204,46 @@ def main():
     fig.savefig(out, dpi=300, bbox_inches="tight")
     print(f"wrote {out}")
 
-    # Numbers quoted in the manuscript text.
+    # Numbers quoted in the manuscript text, taken over the whole run.
     #
-    # The flux comparison is taken over the first simulated day. Beyond that
-    # the column drifts: these cases carry no nudging, so nothing relaxes the
-    # free troposphere back toward the reanalysis, and by day three the US-MMS
-    # sensible heat flux is negative even at midday. The drift diagnostic below
-    # reports that directly, as the change in daily-mean air temperature at the
-    # lowest model level between the first and last simulated day.
-    #
-    # The evaporative fraction is restricted to daylight hours. The nocturnal
-    # sensible heat flux is strongly negative, so an all-hours ratio has a
-    # denominator that approaches zero and stops being a fraction at all.
-    print(f"--- day 1, cold-start steps excluded ({args.case_prefix}) ---")
+    # Statistics are restricted to daylight hours. The nocturnal sensible heat
+    # flux is strongly negative, so an all-hours ratio has a denominator that
+    # approaches zero and stops being a fraction at all. Daylight is defined by
+    # downward shortwave at the surface rather than by clock time, so it adapts
+    # to site and season.
+    print(f"--- whole run, daylight hours ({args.case_prefix}) ---")
     for site, label, _ in SITES:
         ds = outputs[site]
-        shf = np.asarray(ds["shf"].squeeze().values)
-        lhf = np.asarray(ds["lhf"].squeeze().values)
-        pbl = np.asarray(ds["hpbl"].squeeze().values)
-        swd = np.asarray(ds["sfc_dwn_sw"].squeeze().values)
+        shf = np.asarray(ds["shf"].squeeze().values)[SPINUP_STEPS:]
+        lhf = np.asarray(ds["lhf"].squeeze().values)[SPINUP_STEPS:]
+        pbl = np.asarray(ds["hpbl"].squeeze().values)[SPINUP_STEPS:]
+        swd = np.asarray(ds["sfc_dwn_sw"].squeeze().values)[SPINUP_STEPS:]
 
-        first = slice(SPINUP_STEPS, 25)
-        day = swd[first] > DAYLIGHT_SW
-        ef = lhf[first][day].sum() / (lhf[first] + shf[first])[day].sum()
-        print(f"{site}: mean SHF {shf[first].mean():6.1f}"
-              f"  mean LHF {lhf[first].mean():6.1f}"
-              f"  peak LHF {lhf[first].max():6.1f}"
-              f"  daylight evaporative fraction {ef:.2f}"
-              f"  peak PBL {pbl[first].max():.0f} m")
+        day = swd > DAYLIGHT_SW
+        ef = lhf[day].sum() / (lhf[day] + shf[day]).sum()
+        print(f"{site}: daylight mean SHF {shf[day].mean():7.1f} "
+              f" mean LHF {lhf[day].mean():7.1f}"
+              f"  peak LHF {lhf.max():7.1f}"
+              f"  evaporative fraction {ef:5.2f}"
+              f"  peak PBL {pbl.max():.0f} m")
 
-    print(f"--- five-day drift ({args.case_prefix}) ---")
+    print(f"--- soil and drift ({args.case_prefix}) ---")
     for site, label, _ in SITES:
         ds = outputs[site]
         air = np.asarray(ds["T"].squeeze().values)[:, 0]
-        lhf = np.asarray(ds["lhf"].squeeze().values)
-        shf = np.asarray(ds["shf"].squeeze().values)
-        first_day = air[SPINUP_STEPS:24].mean()
-        last_day = air[96:120].mean()
-        print(f"{site}: lowest-level air T {first_day:.1f} -> {last_day:.1f} K "
-              f"({last_day - first_day:+.1f} K over five days), "
-              f"peak SHF day 1 {shf[SPINUP_STEPS:24].max():.0f} -> "
-              f"day 5 {shf[96:120].max():.0f} W m-2")
+        soil = column_mean_soil_temperature(ds)
+        ndays = len(air) // 24
+        first = air[SPINUP_STEPS:24].mean()
+        last = air[(ndays - 1) * 24:ndays * 24].mean()
+        print(f"{site}: column-mean soil T {soil[SPINUP_STEPS]:.1f} -> "
+              f"{soil[-1]:.1f} K over {ndays} days; "
+              f"lowest-level air T drift {last - first:+.1f} K")
+        if site in comparison:
+            tpl = column_mean_soil_temperature(comparison[site])
+            n = min(len(soil), len(tpl))
+            print(f"{'':8s} template-initialised soil differs by "
+                  f"{soil[SPINUP_STEPS] - tpl[SPINUP_STEPS]:+.2f} K at the "
+                  f"start and {soil[n - 1] - tpl[n - 1]:+.2f} K at the end")
 
 if __name__ == "__main__":
     main()

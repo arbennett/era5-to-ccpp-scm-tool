@@ -65,7 +65,7 @@ def arrow(ax, x0, y0, x1, y1):
 
 def main():
     fig, ax = plt.subplots(figsize=(7.4, 3.6))
-    ax.set_xlim(0, 1)
+    ax.set_xlim(-0.01, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
 
@@ -75,7 +75,7 @@ def main():
 
     # --- Data source ------------------------------------------------------
     box(ax, xs[0], row_y, w, row_h,
-        "NSF NCAR\nERA5 archive",
+        "ERA5 archive",
         "s3://nsf-ncar-era5\nor the GLADE mount\n\n"
         "public and anonymous:\nno account, no API key,\nno request queue",
         SOURCE_EDGE, SOURCE_FILL, title_size=8.6)
@@ -104,7 +104,7 @@ def main():
 
     mid = row_y + row_h / 2
     for left in range(3):
-        arrow(ax, xs[left] + w, mid, xs[left + 1] - 0.002, mid)
+        arrow(ax, xs[left] + w, mid, xs[left + 1] - 0.008, mid)
 
     # --- Target model -----------------------------------------------------
     model_y, model_h = 0.055, 0.20
@@ -130,9 +130,10 @@ def main():
             ha="center", va="center", fontsize=8.0,
             color=STAGE_EDGE, fontweight="bold", zorder=3)
 
-    fig.tight_layout(pad=0.3)
+    # add a bit of padding around the overall figure
+    fig.tight_layout(pad=0.3, )
     out = os.path.join(HERE, "workflow.png")
-    fig.savefig(out, dpi=300, bbox_inches="tight")
+    fig.savefig(out, dpi=300, bbox_inches="tight", )
     print(f"wrote {out}")
 
 
