@@ -132,6 +132,9 @@ LAND_VARIABLES: Dict[str, Era5Variable] = {
     "aluvd": Era5Variable("128_016_aluvd", "ll025sc", STREAM_SURFACE, "ALUVD"),
     "alnip": Era5Variable("128_017_alnip", "ll025sc", STREAM_SURFACE, "ALNIP"),
     "alnid": Era5Variable("128_018_alnid", "ll025sc", STREAM_SURFACE, "ALNID"),
+    # Broadband forecast albedo, which unlike the four components above already
+    # includes whatever snow is lying.
+    "fal": Era5Variable("128_243_fal", "ll025sc", STREAM_SURFACE, "FAL"),
     # Surface roughness length, m
     "fsr": Era5Variable("128_244_fsr", "ll025sc", STREAM_SURFACE, "FSR"),
     # Leaf area index of low and high vegetation, m2 m-2

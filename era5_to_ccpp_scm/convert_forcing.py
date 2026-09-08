@@ -173,24 +173,48 @@ def theta_from_t(temperature, pressure):
     ).metpy.dequantify()
 
 
-def calculate_thetal(theta, t, q):
+def calculate_thetal(theta, t, q_liquid=None):
     """
-    Calculate liquid water equivalent potential temperature (K).
+    Calculate liquid water potential temperature (K).
+
+    Following Betts (1973),
+
+        theta_l = theta - (theta / T) * (L_v / c_p) * r_l
+
+    where ``r_l`` is the mixing ratio of *liquid* water.  In cloud-free air
+    there is no liquid water and theta_l reduces to theta.
 
     Parameters
     ----------
-    theta : xarray.DataArray — potential temperature in K (from theta_from_t)
-    t : xarray.DataArray — temperature in K
-    q : xarray.DataArray — specific humidity in kg/kg
+    theta : xarray.DataArray
+        Potential temperature in K, from :func:`theta_from_t`.
+    t : xarray.DataArray
+        Temperature in K.
+    q_liquid : xarray.DataArray, optional
+        Specific cloud liquid water content in kg/kg.  ``None``, the default,
+        means cloud-free, which is the case for the pressure-level fields this
+        package extracts: ERA5 archives cloud liquid water separately and the
+        DEPHY cases written here carry ``ql = qi = 0``, so treating the column
+        as cloud-free keeps the initial state self-consistent.
 
     Returns
     -------
     thetal : xarray.DataArray in K
+
+    Notes
+    -----
+    Passing the *vapour* mixing ratio here instead of the liquid one depresses
+    theta_l by ``(theta / T) * (L_v / c_p) * r_v``, which reaches 20 K near the
+    surface in moist air and makes the initial temperature profile that the SCM
+    reconstructs correspondingly too cold.
     """
+    if q_liquid is None:
+        return theta.metpy.dequantify() if hasattr(theta, "metpy") else theta
+
     t_qty = t * units.kelvin
     cpd = metpy.constants.Cp_d
     Lu = mpcalc.water_latent_heat_vaporization(t_qty)
-    rl = mpcalc.mixing_ratio_from_specific_humidity(q * units("kg/kg"))
+    rl = mpcalc.mixing_ratio_from_specific_humidity(q_liquid * units("kg/kg"))
     thetal = theta - (theta / t_qty) * (Lu * rl / cpd)
     return thetal.metpy.dequantify()
 
@@ -395,11 +419,15 @@ def era5_to_scm_forcing(ds, invariant=None, land_options=None):
         )
 
     # Liquid water potential temperature at center for thil_nudge
+    # The extraction carries no cloud liquid water, and the DEPHY cases written
+    # from it set ql = qi = 0, so the column is treated as cloud-free and
+    # theta_l reduces to theta.
     theta_center = theta_from_t(ds.t.isel(latitude=1, longitude=1), pressure_levels)
     thetal_center = calculate_thetal(
         theta_center,
         ds.t.isel(latitude=1, longitude=1),
-        ds.q.isel(latitude=1, longitude=1),
+        q_liquid=ds["clwc"].isel(latitude=1, longitude=1)
+        if "clwc" in ds.variables else None,
     )
 
     # Required forcing fields

@@ -7,10 +7,12 @@ import numpy as np
 
 from . import templates
 from .util import _maybe_open
+from collections.abc import Mapping
 from typing import Union, Optional
 from .download_era5 import download_era5_time_series
 from .convert_forcing import era5_to_scm_forcing
-from .to_dephy import convert_to_dephy, override_land_state, write_case_namelist
+from .to_dephy import (convert_to_dephy, override_land_state,
+                       parse_nudging_spec, write_case_namelist)
 
 
 @click.group()
@@ -45,6 +47,41 @@ _ROUGHNESS_HELP = (
     "Surface roughness length in cm. Defaults to the ERA5 value at the site "
     "when the land group was downloaded, and to the template value otherwise. "
     "The case namelist is kept consistent with whichever is used."
+)
+
+_NUDGE_HELP = (
+    "How much of the column to relax toward the ERA5 profiles. "
+    "'none' (default) leaves it free running, which is right for a case of a "
+    "day or two and wrong for a month: nothing anchors the column, so it "
+    "drifts and can destabilise. "
+    "'free-troposphere' relaxes above 700 hPa and leaves the boundary layer "
+    "free, which is the right choice for land-atmosphere coupling because the "
+    "layer the surface talks to still evolves on its own; over pronounced "
+    "relief pair it with --advection_taper_pa. "
+    "'full-column' relaxes everything, which is the most robust option and "
+    "survives complex terrain, at the cost of pulling near-surface "
+    "temperature and humidity toward the reanalysis so they no longer respond "
+    "freely to the land surface."
+)
+_NUDGE_TIMESCALE_HELP = (
+    "Override the relaxation timescale in seconds (default 10800, three hours). "
+    "Accepts a per-field list to relax fields on different schedules, e.g. "
+    "'ua=21600,va=21600,ta=21600,qt=43200'; use 'off' to leave a field free. "
+    "Fields are ua, va, ta and qt (qv is accepted for qt)."
+)
+_NUDGE_PA_HELP = (
+    "Override the pressure in Pa above which nudging is applied. Zero nudges "
+    "the whole column. Accepts the same per-field list form as "
+    "--nudging_timescale_s, e.g. 'ta=85000,qt=85000'."
+)
+_TAPER_HELP = (
+    "Fade the advective tendencies to zero over this depth in Pa above the "
+    "surface. Off by default. Horizontal gradients taken on a pressure "
+    "surface close to the ground describe terrain rather than advection, "
+    "because the surface cuts the hillsides differently at each stencil "
+    "point; over relief the spurious tendency does not average out. Tapering "
+    "removes the forcing where it cannot be trusted and lets the boundary "
+    "layer respond to the surface instead. Try 15000 at a rough site."
 )
 
 _TRANSFER_HELP = (
@@ -315,15 +352,26 @@ def _core_convert_to_dephy(
     namelist_file: Optional[str] = None,
     scm_cases_dir: Optional[str] = None,
     scm_config_dir: Optional[str] = None,
+    nudging: str = 'none',
+    nudging_timescale_s: Union[float, str, Mapping, None] = None,
+    nudging_above_pa: Union[float, str, Mapping, None] = None,
+    advection_taper_pa: float = 0.0,
 ):
     """
     Core logic: convert processed ERA5 forcings to DEPHY format and optionally
     deposit output files directly into an SCM directory tree.
 
+    ``nudging_timescale_s`` and ``nudging_above_pa`` accept a number, a mapping
+    of field name to value, or the command-line string form
+    ``'ua=21600,qt=43200'``; see :func:`~era5_to_ccpp_scm.to_dephy.parse_nudging_spec`.
+
     ``sfc_roughness_length_cm`` defaults to whatever the land state carries,
     falling back to the template value.  Passing it explicitly overrides both,
     and the namelist is kept consistent with whichever value is used.
     """
+    nudging_timescale_s = parse_nudging_spec(nudging_timescale_s)
+    nudging_above_pa = parse_nudging_spec(nudging_above_pa)
+
     era5_ds = _maybe_open(era5_processed_forcings)
     if isinstance(era5_processed_forcings, str):
         # Read it now and let go of the handle; see _core_convert_forcings.
@@ -348,6 +396,10 @@ def _core_convert_to_dephy(
         template_name=template,
         column_area=column_area,
         scalars_override=scalars_override,
+        nudging=nudging,
+        nudging_timescale_s=nudging_timescale_s,
+        nudging_above_pa=nudging_above_pa,
+        advection_taper_pa=advection_taper_pa,
     )
 
     # Write companion .nml file
@@ -396,6 +448,15 @@ def _core_convert_to_dephy(
               help='If set, copy *_SCM_driver.nc here after writing')
 @click.option('--scm_config_dir', type=str, default=None,
               help='If set, copy *.nml here after writing')
+@click.option('--nudging',
+              type=click.Choice(['none', 'free-troposphere', 'full-column']),
+              default='none', help=_NUDGE_HELP)
+@click.option('--nudging_timescale_s', type=str, default=None,
+              help=_NUDGE_TIMESCALE_HELP)
+@click.option('--nudging_above_pa', type=str, default=None,
+              help=_NUDGE_PA_HELP)
+@click.option('--advection_taper_pa', type=float, default=0.0,
+              help=_TAPER_HELP)
 def convert_to_dephy_cmd(
     era5_processed_forcings: str,
     start_date: str,
@@ -407,6 +468,10 @@ def convert_to_dephy_cmd(
     namelist_file: Optional[str],
     scm_cases_dir: Optional[str],
     scm_config_dir: Optional[str],
+    nudging: str,
+    nudging_timescale_s: Optional[str],
+    nudging_above_pa: Optional[str],
+    advection_taper_pa: float,
 ):
     """
     Convert processed ERA5 forcings to DEPHY-format CCPP-SCM driver file.
@@ -425,6 +490,10 @@ def convert_to_dephy_cmd(
         namelist_file=namelist_file,
         scm_cases_dir=scm_cases_dir,
         scm_config_dir=scm_config_dir,
+        nudging=nudging,
+        nudging_timescale_s=nudging_timescale_s,
+        nudging_above_pa=nudging_above_pa,
+        advection_taper_pa=advection_taper_pa,
     )
 
 
@@ -461,6 +530,15 @@ def convert_to_dephy_cmd(
 @click.option('--soil_moisture_transfer',
               type=click.Choice(['relative', 'direct']), default='relative',
               help=_TRANSFER_HELP)
+@click.option('--nudging',
+              type=click.Choice(['none', 'free-troposphere', 'full-column']),
+              default='none', help=_NUDGE_HELP)
+@click.option('--nudging_timescale_s', type=str, default=None,
+              help=_NUDGE_TIMESCALE_HELP)
+@click.option('--nudging_above_pa', type=str, default=None,
+              help=_NUDGE_PA_HELP)
+@click.option('--advection_taper_pa', type=float, default=0.0,
+              help=_TAPER_HELP)
 def run_full_pipeline(
     start_date: str,
     end_date: str,
@@ -480,6 +558,10 @@ def run_full_pipeline(
     vegtyp: Optional[str] = None,
     soiltyp: Optional[str] = None,
     soil_moisture_transfer: str = 'relative',
+    nudging: str = 'none',
+    nudging_timescale_s: Optional[str] = None,
+    nudging_above_pa: Optional[str] = None,
+    advection_taper_pa: float = 0.0,
 ):
     """
     Full pipeline: download ERA5 → convert forcings → write DEPHY SCM driver.
@@ -534,6 +616,10 @@ def run_full_pipeline(
         namelist_file=nml_file,
         scm_cases_dir=scm_cases_dir,
         scm_config_dir=scm_config_dir,
+        nudging=nudging,
+        nudging_timescale_s=nudging_timescale_s,
+        nudging_above_pa=nudging_above_pa,
+        advection_taper_pa=advection_taper_pa,
     )
     print('--- Done ---')
 

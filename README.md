@@ -119,6 +119,42 @@ era5-scm-tool convert_to_dephy \
 `initial`, `scalars` groups) and is kept only for backward compatibility;
 current SCM releases read DEPHY.
 
+### Nudging fields on different schedules
+
+`--nudging_timescale_s` and `--nudging_above_pa` take a bare number, which
+applies to every nudged field, or a per-field list:
+
+```bash
+era5-scm-tool convert_to_dephy \
+  --era5_processed_forcings US-Jo2_scm_forcings.nc \
+  --start_date 2020-08-01 \
+  --case_name era5_optz_US-Jo2_exp2 \
+  --output_file era5_optz_US-Jo2_exp2_SCM_driver.nc \
+  --nudging_timescale_s 'ua=21600,va=21600,ta=21600,qt=43200' \
+  --nudging_above_pa 85000
+```
+
+Fields are `ua`, `va`, `ta` and `qt` (`qv` is accepted for `qt`; CCPP-SCM v7.0.0
+treats the two attributes identically). A field set to `off` is left free
+running, and one left out of the list inherits the profile's timescale.
+
+This is what lets a study isolate one field's constraint. Holding wind and
+temperature on a fixed timescale while varying only the moisture relaxation
+means a difference between two runs is attributable to the moisture treatment,
+rather than to the whole column being anchored more or less tightly. From
+Python, pass a mapping:
+
+```python
+convert_to_dephy(
+    era5_processed=forcings,
+    start_date="2020-08-01",
+    case_name="era5_optz_US-Jo2_exp2",
+    output_file="era5_optz_US-Jo2_exp2_SCM_driver.nc",
+    nudging_timescale_s={"ua": 21600, "va": 21600, "ta": 21600, "qt": 43200},
+    nudging_above_pa=85000.0,
+)
+```
+
 ### Running the full pipeline
 Download, forcing conversion and DEPHY output in one command:
 
@@ -201,6 +237,68 @@ writes in place unless given `-o`, and records the change in both
 
 Pass `--no_land` to skip the land download entirely and fall back to the
 template, which reproduces the behaviour of releases before this feature.
+
+## Run length, nudging, and the advection taper
+
+A single-column model with prescribed forcing has nothing tying it to the
+reanalysis it was built from, so errors accumulate. Over a day or two that does
+not matter. Over weeks the column drifts and can destabilise. `--nudging`
+chooses how much of it to hold:
+
+| `--nudging` | what it does | when to use it |
+|---|---|---|
+| `none` (default) | nothing constrains the column | cases of a day or two |
+| `free-troposphere` | relaxes above 700 hPa, boundary layer free | coupling work at sites with gentle terrain |
+| `full-column` | relaxes everything | runs of a week or more, and any site with pronounced relief |
+
+`free-troposphere` is the better choice on physical grounds, because the layer
+the surface actually communicates with still evolves on its own. `full-column`
+pulls near-surface temperature and humidity toward the reanalysis, so they no
+longer respond freely to the land surface; the coupling signal is damped but
+not removed, since surface fluxes are still diagnosed from the land state and
+the soil still evolves on its own.
+
+Override the timescale with `--nudging_timescale_s` (default 10800 s, three
+hours) and the cutoff with `--nudging_above_pa`.
+
+### The advection taper
+
+`--advection_taper_pa` fades the advective tendencies and the pressure velocity
+to zero over a given depth above the surface. Two reasons to use it:
+
+- Horizontal gradients taken on a pressure surface close to the ground describe
+  terrain rather than advection, because the surface cuts the hillsides
+  differently at each stencil point. Over relief the spurious tendency does not
+  average out.
+- The pressure velocity has to vanish at the ground, and ERA5 does not deliver
+  that where the lowest levels sit within the relief.
+
+15000 Pa is a reasonable value. Measured at Walnut Gulch, where the surface
+varies by 155 m across the 3x3 stencil, against Morgan Monroe at 37 m:
+
+| | untapered near-surface tendency | monthly-mean pressure velocity |
+|---|---|---|
+| US-Whs | −2.7 to −5.2 K/day | −0.04 to −0.09 Pa/s |
+| US-MMS | +0.7 to +1.3 K/day | ±0.018 Pa/s |
+
+**The taper is not a substitute for nudging at a rough site.** At Walnut Gulch
+the low-level advection is both terrain-contaminated and the real driver of the
+January warming, so tapering it removes the signal along with the error and the
+column cools. Measured against ERA5 2 m temperature over January:
+
+| US-Whs configuration | bias | correlation |
+|---|---|---|
+| `free-troposphere` | −15.5 K | 0.04 |
+| `free-troposphere` + taper | −11.9 K | 0.15 |
+| `full-column` | −1.1 K | 0.95 |
+| `full-column` + taper | **−0.6 K** | **0.95** |
+
+So use the taper alongside nudging, not instead of it. At a gentle site like
+Morgan Monroe every configuration works and the taper is close to neutral.
+
+`paper/make_diagnostic_figure.py` plots near-surface air temperature against
+ERA5 and prints these statistics, which is the check to run before trusting a
+long case.
 
 ### Known limitations
 

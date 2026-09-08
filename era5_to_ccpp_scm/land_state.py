@@ -725,13 +725,39 @@ def derive_land_state(
             state[dephy_name] = value
             provenance[dephy_name] = f"ERA5 {era5_name}"
 
-    snow_albedo = _at_time("asn")
-    if snow_albedo is not None and state.get("weasd", 0.0) > 0.0:
-        # ERA5's asn is the instantaneous snow albedo, which only approaches
-        # the maximum that snoalb is meant to hold when the snow is fresh, so
-        # it is only adopted where there is snow on the ground to describe.
-        state["snoalb"] = snow_albedo
-        provenance["snoalb"] = "ERA5 asn (instantaneous, snow present)"
+    # snoalb is nominally the deep-snow albedo, but the GFS radiation gives it
+    # weight wherever the snow-free fractions do not account for the whole
+    # cell, and at some sites it becomes the surface albedo outright.  The
+    # packaged template carries 0.73, a Netherlands value, which at a desert
+    # site reflects most of the incoming shortwave and cools the surface
+    # steadily.  The highest broadband albedo ERA5 shows at the site over the
+    # case is used instead: where snow falls that captures the snow-covered
+    # value, and where it never does it reduces to the bare-ground albedo,
+    # which is the right answer for a site that does not see snow.
+    def _max_over_case(name):
+        if name not in sfc.variables:
+            return None
+        field = sfc[name]
+        if "time" in field.dims:
+            field = field.max("time")
+        return float(_center_value(field, center))
+
+    forecast_albedo = _max_over_case("fal")
+    if forecast_albedo is not None:
+        state["snoalb"] = forecast_albedo
+        provenance["snoalb"] = "ERA5 fal, maximum over the case"
+    else:
+        # Extractions made before the broadband albedo was collected still
+        # carry the four directional components, whose largest value bounds the
+        # albedo the surface actually reaches.
+        components = [_max_over_case(n)
+                      for n in ("aluvp", "aluvd", "alnip", "alnid")]
+        components = [c for c in components if c is not None]
+        if components:
+            state["snoalb"] = max(components)
+            provenance["snoalb"] = (
+                "largest of the ERA5 albedo components over the case"
+            )
 
     # --- vegetation cover -------------------------------------------------
     cvl, cvh = _invariant("cvl"), _invariant("cvh")
