@@ -46,7 +46,7 @@ Single-column models (SCMs) simulate the physics of an atmospheric model,
 including radiation, turbulence, convection, cloud microphysics, and the land
 surface, for a single vertical column, with the effects of the resolved
 dynamics supplied as prescribed forcing rather than computed by the model
-itself [@randall1996]. Because single column models are computationallly frugal, they are widely used for developing and testing parameterizations,
+itself [@randall1996]. Because single column models are computationally frugal, they are widely used for developing and testing parameterizations,
 and for examining what a physics suite does at a particular place and time.
 Running an SCM requires a case, which consists of initial profiles of the
 atmospheric state, large-scale advective tendencies of heat and moisture,
@@ -89,8 +89,8 @@ requires no authentication, and is published in two places with an identical
 directory layout: an anonymous S3 bucket that can be read from anywhere, and a
 filesystem mount on NSF NCAR machines. We verified that the two backends
 produce bit-identical extractions, so a workflow developed on a laptop
-reproduces exactly on a high-performance computing system. Forcing derivations such as this usually implemented as ad hoc solutions based on
-similar sets of equations, and our goal was to formalize the process by developing this package. 
+reproduces exactly on a high-performance computing system. Forcing derivations such as this are usually implemented as ad hoc solutions based on
+similar sets of equations, and our goal was to formalize the process by developing this package.
 
 We chose CCPP-SCM as the target model because of its lineage. CCPP-SCM is the
 single-column driver for the Common Community Physics Package
@@ -123,7 +123,7 @@ record assembled across several years is not homogeneous. ERA5 is a reanalysis,
 in which a single frozen model and assimilation system is applied across the
 whole 1940 to present record while ingesting the observational record as it
 goes [@hersbach2020]. For studies that span many sites and many years, that
-observational constraint and temporal homogeneity are are of interest, making the two tools to be complementary rather than competing.
+observational constraint and temporal homogeneity are of interest, making the two tools complementary rather than competing.
 
 # Methods
 
@@ -261,7 +261,7 @@ three stencil costs the same as reading the entire file, which is roughly
 1.3 GB per pressure level variable per day. That cost is incurred per file
 rather than per site, so we provide a function that extracts many sites in a
 single pass over the archive, for which the marginal cost of an additional site
-is close to zero. 
+is close to zero.
 
 # Example application
 
@@ -356,7 +356,7 @@ A second group of limitations concerns how long a case can usefully be run, and
 what has to be given up to run it that long. Left unconstrained the column
 drifts, so a run of more than about a week needs the relaxation described in the
 methods, and the setting that proved robust at both of our sites relaxes the
-whole column rather than the free troposphere alone. 
+whole column rather than the free troposphere alone.
 The boundary layer is how the land surface communicates with
 the atmosphere, and relaxing it pulls near-surface temperature and humidity
 toward the reanalysis, so a study of how strongly the surface controls the air
