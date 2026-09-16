@@ -379,7 +379,7 @@ The group names are `forcing`, `initial`, and `scalars`, with a root group that 
 - `h_advec_thetail ('levels', 'time')` :  prescribed theta_il tendency due to horizontal advection ( K s^-1 )
 - `v_advec_thetail ('levels', 'time')` :  prescribed theta_il tendency due to vertical advection ( K s^-1 )
 - `h_advec_qt ('levels', 'time')` :  prescribed q_t tendency due to horizontal advection ( kg kg^-1 s^-1 )
-- `v_advec_qt ('levels', 'time')` :  prescribe q_t tendency due to vertical advection ( kg kg^-1 s^-1 )
+- `v_advec_qt ('levels', 'time')` :  prescribed q_t tendency due to vertical advection ( kg kg^-1 s^-1 )
 
 ### Initial condition data
 
@@ -396,7 +396,7 @@ The group names are `forcing`, `initial`, and `scalars`, with a root group that 
 - ` smc ('nsoil',) `:  initial profile of soil moisture ( m3 m-3 )
 - ` slc ('nsoil',) `:  initial profile of soil liquid moisture ( m3 m-3 )
 
-### Scalars 
+### Scalars
 
 - ` alvsf () `:  60 degree vis albedo with strong cosz dependency ( - )
 - ` alnsf () `:  60 degree nir albedo with strong cosz dependency ( - )
