@@ -42,7 +42,7 @@ bibliography: paper.bib
 
 # Summary
 
-Single-column models (SCMs) simulate the physics of an atmospheric model,
+Single column models (SCMs) simulate the physics of an atmospheric model,
 including radiation, turbulence, convection, cloud microphysics, and the land
 surface, for a single vertical column, with the effects of the resolved
 dynamics supplied as prescribed forcing rather than computed by the model
@@ -50,19 +50,19 @@ itself [@randall1996]. Because single column models are computationally frugal, 
 and for examining what a physics suite does at a particular place and time.
 Running an SCM requires a case, which consists of initial profiles of the
 atmospheric state, large-scale advective tendencies of heat and moisture,
-vertical motion, geostrophic winds, and surface and land-surface properties,
+vertical motion, geostrophic winds, and land-surface properties,
 all assembled in the layout that the target model reads. Building such a case
 has traditionally been an ad hoc, per-study effort, and as a result the case
 libraries that the community shares consist of a few dozen curated field
 campaign cases.
 
 `era5-to-ccpp-scm-tool` is a Python package and command line tool that builds
-SCM cases for the CCPP-SCM from ERA5 reanalysis [@hersbach2020] for any location on the globe.
+SCM cases for the Common Community Physics Package
+Single Column Model (CCPP-SCM) [@heinzeller2023; @ccppscm] from ERA5 reanalysis [@hersbach2020] for any location on the globe.
 Given a latitude, longitude, and date range, it extracts the reanalysis fields
 that are needed, derives the full set of large-scale forcing terms, and writes
 a case in the DEPHY format [@dephy] along with its configuration namelist, so
-that the case can be run directly in the Common Community Physics Package
-Single Column Model (CCPP-SCM) [@heinzeller2023; @ccppscm]. A complete case is
+that the case can be run directly in the CCPP-SCM. A complete case is
 generated with a single command:
 
 ```bash
@@ -226,7 +226,7 @@ in any case vanish at the ground, which ERA5 does not deliver where the lowest
 levels sit within the relief. At US-Whs, where the surface varies by 155 m
 across the stencil, the untapered fields carry a sustained 3 to 5 K per day of
 low level cooling and a monthly mean pressure velocity near 0.09 Pa s $^{-1}$ of
-ascent, against 1 K per day and 0.02 Pa s $^{-1}$ at the gentler US-MMS.
+ascent, against 1 K per day and 0.02 Pa s $^{-1}$ at the gentler US-MMS. Both US-Whs and US-MMS are FLUXNET sites used as examples with detailed description below.
 
 We had expected the taper to substitute for nudging at rough sites, and it does
 not. Tapering alone leaves US-Whs 12 K too cold over a month, because the low
@@ -289,7 +289,7 @@ carrying roughly twice the near-surface total water of US-Whs, at 6.4 against
 3.1 $g/kg$. The land surface state is likewise specific to each site. The
 initial soil temperature profiles differ between the two cases in both
 magnitude and in the sign of their vertical gradient. The January US-Whs profile
-rises from 280 K in the uppermost layer to 291 K at two metres, as the deep soil
+rises from 280 K in the uppermost layer to 291 K at two meters, as the deep soil
 retains the previous summer's heat, while the June US-MMS profile falls from
 292 K to 285 K over the same depth. Recovering this seasonal reversal follows
 directly from taking the soil state from the reanalysis, since any single
@@ -340,10 +340,10 @@ the way it gets there. ERA5 describes land cover and soil texture on the same
 an eddy covariance tower, and where a site publishes its own classification we
 expect that to be used instead. The package accepts a vegetation class by its
 FLUXNET abbreviation for exactly this purpose, both when a case is built and as
-a patch applied to a case that has already been written. The HTESSEL and Noah
+a patch applied to a case that has already been written. The HTESSEL and Noah-MP
 parameter tables also differ in ways that transferring the degree of saturation
 reduces without removing, so soil moisture carried between them is better read
-as an equivalent wetness than as a measured water content. Noah moreover begins
+as an equivalent wetness than as a measured water content. Noah-MP moreover begins
 from a surface that was equilibrated by a different land surface model, and at
 some sites this produces a transient in the surface fluxes over the first model
 step, which we recommend discarding and which lengthening the spinup period
