@@ -57,12 +57,12 @@ libraries that the community shares consist of a few dozen curated field
 campaign cases.
 
 `era5-to-ccpp-scm-tool` is a Python package and command line tool that builds
-SCM cases for the CCPP-SCM from ERA5 reanalysis [@hersbach2020] for any location on the globe.
+SCM cases for the Common Community Physics Package
+Single Column Model (CCPP-SCM) [@heinzeller2023; @ccppscm] from ERA5 reanalysis [@hersbach2020] for any location on the globe.
 Given a latitude, longitude, and date range, it extracts the reanalysis fields
 that are needed, derives the full set of large-scale forcing terms, and writes
 a case in the DEPHY format [@dephy] along with its configuration namelist, so
-that the case can be run directly in the Common Community Physics Package
-Single Column Model (CCPP-SCM) [@heinzeller2023; @ccppscm]. A complete case is
+that the case can be run directly in the CCPP-SCM. A complete case is
 generated with a single command:
 
 ```bash
@@ -99,7 +99,7 @@ code, invoked through the same framework, as the physics in NOAA's operational
 Unified Forecast System. Suites are selected at
 run time from suite definition files, which makes it inexpensive to push a
 single case through several physics configurations and to attribute the
-differences to the physics rather than to the setup. CCPP-SCM also couples a
+differences to the physics rather than to the setup [@groot2026]. CCPP-SCM also couples a
 full land surface model [Noah-MP, @niu2011], which is a requirement for the
 land-atmosphere coupling problems that motivated this work, and it reads DEPHY
 [@dephy], a community format, so the cases that this tool writes are not
