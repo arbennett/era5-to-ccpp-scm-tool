@@ -130,9 +130,12 @@ observational constraint and temporal homogeneity are of interest, making the tw
 ERA5 and a DEPHY case file differ in many conventions, and the
 conversions between them fall into six broad groups.
 
-The first group concerns coordinates and indexing. ERA5 latitudes are stored
-north first, so a northward gradient is computed as the difference between the
-first and third rows of the stencil rather than the reverse. Longitudes run
+The first group concerns coordinates and indexing. Horizontal gradients are
+taken across a stencil, by which we mean the small block of neighboring ERA5
+grid cells, three by three by default, that is centered on the site. ERA5
+latitudes are stored north first, so a northward gradient is computed as the
+difference between the first and third rows of the stencil rather than the
+reverse. Longitudes run
 from 0 to 360 degrees and are unwrapped when a site lies near the prime
 meridian, and pressure levels arrive in hPa and are re-indexed onto their
 converted values rather than simply rescaled.
@@ -163,9 +166,10 @@ The fifth group concerns the land surface. ERA5 is produced with the HTESSEL
 land surface model [@balsamo2009], whose state cannot be handed to Noah or
 Noah-MP unchanged, and reconciling the two requires three separate
 transformations. The four soil layers that HTESSEL carries have interfaces at
-7, 28, 100 and 289 cm against the 10, 40, 100 and 200 cm that Noah uses, so
-soil temperature and moisture are remapped by overlap weighting, which
-conserves the depth integral of the remapped quantity. The two models also
+7, 28, 100 and 289 cm against the historical default four layer configuration
+at 10, 40, 100 and 200 cm that Noah and Noah-MP use, so soil temperature and
+moisture are remapped by overlap weighting, which conserves the depth integral
+of the remapped quantity. The two models also
 assign different porosities and wilting points to the same soil, so carrying a
 volumetric water content across unchanged can place it outside the physical
 range of the receiving soil type, and we therefore transfer the degree of
@@ -226,7 +230,9 @@ in any case vanish at the ground, which ERA5 does not deliver where the lowest
 levels sit within the relief. At US-Whs, where the surface varies by 155 m
 across the stencil, the untapered fields carry a sustained 3 to 5 K per day of
 low level cooling and a monthly mean pressure velocity near 0.09 Pa s $^{-1}$ of
-ascent, against 1 K per day and 0.02 Pa s $^{-1}$ at the gentler US-MMS. Both US-Whs and US-MMS are FLUXNET sites used as examples with detailed description below.
+ascent, against 1 K per day and 0.02 Pa s $^{-1}$ at the gentler US-MMS. Both
+US-Whs and US-MMS are FLUXNET sites that we use as worked examples, and they
+are described in the example application section below.
 
 We had expected the taper to substitute for nudging at rough sites, and it does
 not. Tapering alone leaves US-Whs 12 K too cold over a month, because the low
@@ -249,9 +255,8 @@ directory tree so that nothing needs to be copied by hand.
 ![A schematic representation of the era5-to-ccpp-scm-tool software
 flow.\label{fig:workflow}](workflow.png)
 
-ERA5 is read as a three by three stencil centered on the site of interest,
-which is the smallest footprint that supports centered horizontal gradients.
-The width of the stencil can be increased in whole grid cells, which trades
+The default three by three stencil is the smallest footprint that supports
+centered horizontal gradients, but its width can be increased in whole grid cells, which trades
 spatial resolution for gradients that are less sensitive to noise in the
 reanalysis fields.
 
@@ -273,8 +278,14 @@ a single invocation of the full pipeline, contained every variable that the
 reference DEPHY case file carries, and ran for a month in CCPP-SCM v7.0.0 under
 the `SCM_GFS_v16` suite without further intervention. Both use relaxation of the
 whole column and an advection taper of 15000 Pa, which are the settings
-described above. \autoref{fig:case} shows the initial state that was written
-into each case file along with the resulting simulation.
+described above. The relaxation is applied by the SCM at every model time step
+toward the hourly reanalysis profiles that the case file carries, with the
+default relaxation timescale of three hours. \autoref{fig:case} shows the
+initial state that was written into each case file along with the resulting
+simulation. To isolate what the derived land state contributes, we also ran
+each site a second time with the soil and vegetation state of the stock
+CCPP-SCM case template in place of the one derived from ERA5, leaving
+everything else unchanged.
 
 ![Two cases from generation to simulation. The top row shows the initial state
 written into the DEPHY case files, and the bottom row shows the month of
@@ -350,7 +361,10 @@ step, which we recommend discarding and which lengthening the spinup period
 does not remove. A few fields have no ERA5 counterpart at all, among them the
 maximum snow albedo, the fractional coverage weights that divide the albedo
 between its strong and weak zenith angle components, and the friction velocity,
-and these are still inherited from the case template [@niu2011].
+and these are still inherited from the case template [@niu2011]. Code
+modifications are required to use this package with Noah-MP configurations that
+do not use the historical default four layer soil column discretization noted
+above.
 
 A second group of limitations concerns how long a case can usefully be run, and
 what has to be given up to run it that long. Left unconstrained the column
